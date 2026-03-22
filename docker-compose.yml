@@ -1,0 +1,36 @@
+services:
+  etl:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-tcc-etl-bucket}
+      - S3_PREFIX=${S3_PREFIX:-data/}
+      - SOURCE_URL=${SOURCE_URL:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Point to LocalStack when running locally
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localstack:4566}
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=${LOCALSTACK_DEBUG:-0}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - localstack_data:/var/lib/localstack
+
+volumes:
+  localstack_data:
