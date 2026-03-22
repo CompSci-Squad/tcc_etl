@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,8 +34,12 @@ class Settings(BaseSettings):
 
     # ── AWS / S3 ──────────────────────────────────────────────────────────
     aws_region: str = Field(default="us-east-1", description="AWS region")
-    aws_access_key_id: str = Field(default="", description="AWS access key ID")
-    aws_secret_access_key: str = Field(default="", description="AWS secret access key")
+    aws_access_key_id: SecretStr = Field(
+        default=SecretStr(""), description="AWS access key ID"
+    )
+    aws_secret_access_key: SecretStr = Field(
+        default=SecretStr(""), description="AWS secret access key"
+    )
     aws_endpoint_url: str | None = Field(
         default=None,
         description="Optional custom endpoint (e.g. LocalStack http://localhost:4566)",
@@ -43,20 +48,18 @@ class Settings(BaseSettings):
     s3_prefix: str = Field(default="data/", description="Key prefix inside the bucket")
 
     # ── Pipeline ──────────────────────────────────────────────────────────
-    batch_size: int = Field(default=10_000, ge=1, description="Records per batch")
-    max_workers: int = Field(default=4, ge=1, description="Thread-pool size for parallel loads")
-    source_url: str = Field(
-        default="https://raw.githubusercontent.com/CompSci-Squad/tcc_etl/main/README.md",
-        description="Default data source URL",
-    )
+    batch_size: int = Field(default=10_000, ge=1, description="Records per batch (chunk_size)")
+    max_workers: int = Field(default=4, ge=1, description="Concurrency limit for parallel loads")
+    source_url: str = Field(default="", description="Data source URL (set via SOURCE_URL env var)")
 
     # ── Observability ─────────────────────────────────────────────────────
     log_level: LogLevel = Field(default=LogLevel.INFO, description="Log level")
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return a cached ``Settings`` instance (created once per process)."""
-    return _settings_singleton
+    """Return a cached ``Settings`` instance (created once per process).
 
-
-_settings_singleton: Settings = Settings()
+    Call ``get_settings.cache_clear()`` in tests to reset between runs.
+    """
+    return Settings()

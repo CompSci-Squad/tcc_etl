@@ -30,7 +30,7 @@ class FileExtractor(BaseExtractor):
         self.path = Path(path)
         self.encoding = encoding
 
-    def extract(self) -> Any:  # noqa: ANN401
+    async def extract(self) -> Any:  # noqa: ANN401
         """Read and parse the file.
 
         Returns

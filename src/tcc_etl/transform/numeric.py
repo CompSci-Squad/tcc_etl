@@ -1,109 +1,100 @@
-"""Numba-accelerated numeric transformations.
+"""JAX-accelerated numeric transformations.
 
-This module provides JIT-compiled helper functions via **Numba** that operate
-on NumPy arrays.  Numba compiles these functions to native machine code on
-the first call, yielding near-C performance for heavy numeric workloads.
+This module provides JIT-compiled helper functions via **JAX** that operate
+on arrays.  JAX compiles these functions to XLA operations on the first call,
+yielding accelerator (CPU/GPU/TPU) performance for heavy numeric workloads.
 
 Note
 ----
-Numba is available only on CPython.  When running on PyPy the helpers fall
-back to their pure-NumPy counterparts automatically (PyPy already applies
-its own JIT compilation).
+When JAX is unavailable the module falls back to pure-Python implementations
+so the pipeline can still run in stripped environments.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
-import numpy as np
-import numpy.typing as npt
-
 # ---------------------------------------------------------------------------
-# Numba JIT compilation with graceful fallback for PyPy / environments where
-# Numba is not installed.
+# JAX JIT compilation with graceful pure-Python fallback.
 # ---------------------------------------------------------------------------
 try:
-    from numba import njit  # type: ignore[import-untyped]
+    import jax
+    import jax.numpy as jnp
 
-    _NUMBA_AVAILABLE = True
-except ImportError:  # pragma: no cover - PyPy or stripped environment
-    _NUMBA_AVAILABLE = False
+    _JAX_AVAILABLE = True
 
-    def njit(  # type: ignore[misc]
-        *_args: object,
-        **_kwargs: object,
-    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
-        """Identity decorator - passthrough when numba is unavailable."""
+    @jax.jit
+    def _normalize_jax(arr: jax.Array) -> jax.Array:
+        """Min-max normalize *arr* to [0, 1] via XLA."""
+        min_val = jnp.min(arr)
+        max_val = jnp.max(arr)
+        rng = max_val - min_val
+        # Avoid division by zero: when rng==0 every value maps to 0.0
+        safe_rng = jnp.where(rng > 0, rng, 1.0)
+        return jnp.where(rng > 0, (arr - min_val) / safe_rng, jnp.zeros_like(arr))
 
-        def decorator(fn: Callable[..., object]) -> Callable[..., object]:  # type: ignore[misc]
-            return fn
+    @jax.jit
+    def _clip_jax(arr: jax.Array, lo: float, hi: float) -> jax.Array:
+        """Clip *arr* to [lo, hi] via XLA."""
+        return jnp.clip(arr, min=lo, max=hi)
 
-        return decorator
-
-
-# ---------------------------------------------------------------------------
-# JIT-compiled kernels
-# ---------------------------------------------------------------------------
-
-
-@njit(cache=True, fastmath=True)  # type: ignore[misc]
-def _normalize_array(arr: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-    """Min-max normalize *arr* to the [0, 1] range.
-
-    Compiled with ``fastmath=True`` for maximum floating-point throughput.
-    Returns *arr* unchanged if all values are identical (zero range).
-    """
-    min_val = arr[0]
-    max_val = arr[0]
-    for v in arr:
-        if v < min_val:
-            min_val = v
-        if v > max_val:
-            max_val = v
-    rng = max_val - min_val
-    if rng == 0.0:
-        return arr
-    result = np.empty_like(arr)
-    for i, v in enumerate(arr):
-        result[i] = (v - min_val) / rng
-    return result
-
-
-@njit(cache=True, fastmath=True)  # type: ignore[misc]
-def _clip_array(
-    arr: npt.NDArray[np.float64],
-    lo: float,
-    hi: float,
-) -> npt.NDArray[np.float64]:
-    """Clip *arr* values to the [lo, hi] interval (JIT-compiled)."""
-    result = np.empty_like(arr)
-    for i, v in enumerate(arr):
-        if v < lo:
-            result[i] = lo
-        elif v > hi:
-            result[i] = hi
-        else:
-            result[i] = v
-    return result
+except ImportError:  # pragma: no cover
+    _JAX_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
-# Public helpers (backed by JIT kernels above)
+# Public helpers
 # ---------------------------------------------------------------------------
 
 
-def normalize_column(arr: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+def normalize_column(arr: list[float]) -> list[float]:
     """Return a min-max normalized copy of *arr* (values ∈ [0, 1]).
 
-    Uses the Numba-compiled kernel when available.
+    Uses the JAX-compiled kernel when available; falls back to pure Python.
+
+    Parameters
+    ----------
+    arr:
+        1-D sequence of floats.
+
+    Returns
+    -------
+    list[float]
+        Normalized values ready to be assigned back to a Polars Series.
     """
-    return _normalize_array(np.asarray(arr, dtype=np.float64))
+    if not arr:
+        return arr
+    if _JAX_AVAILABLE:
+        return _normalize_jax(jnp.array(arr, dtype=jnp.float32)).tolist()  # type: ignore[union-attr]
+    # Pure-Python fallback
+    min_val = min(arr)
+    max_val = max(arr)
+    rng = max_val - min_val
+    if rng == 0.0:
+        return [0.0] * len(arr)
+    return [(v - min_val) / rng for v in arr]
 
 
-def clip_column(
-    arr: npt.NDArray[np.float64],
-    lo: float,
-    hi: float,
-) -> npt.NDArray[np.float64]:
-    """Clip *arr* to *[lo, hi]* using a JIT-compiled loop."""
-    return _clip_array(np.asarray(arr, dtype=np.float64), lo, hi)
+def clip_column(arr: list[float], lo: float, hi: float) -> list[float]:
+    """Clip *arr* to *[lo, hi]*.
+
+    Uses the JAX-compiled kernel when available; falls back to pure Python.
+
+    Parameters
+    ----------
+    arr:
+        1-D sequence of floats.
+    lo:
+        Lower bound (inclusive).
+    hi:
+        Upper bound (inclusive).
+
+    Returns
+    -------
+    list[float]
+        Clipped values ready to be assigned back to a Polars Series.
+    """
+    if not arr:
+        return arr
+    if _JAX_AVAILABLE:
+        return _clip_jax(jnp.array(arr, dtype=jnp.float32), lo, hi).tolist()  # type: ignore[union-attr]
+    # Pure-Python fallback
+    return [lo if v < lo else hi if v > hi else v for v in arr]

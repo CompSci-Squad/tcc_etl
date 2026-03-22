@@ -8,9 +8,22 @@ from collections.abc import Generator
 from pathlib import Path
 
 import boto3
-import pandas as pd
+import polars as pl
 import pytest
 from moto import mock_aws
+
+
+# ---------------------------------------------------------------------------
+# Settings cache isolation - must run before every test
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _clear_settings_cache() -> Generator[None, None, None]:
+    """Reset the lru_cache on get_settings() before and after each test."""
+    from tcc_etl.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -18,12 +31,13 @@ from moto import mock_aws
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _aws_credentials() -> Generator[None, None, None]:
-    """Inject fake AWS credentials for every test."""
+    """Inject fake AWS credentials and a default SOURCE_URL for every test."""
     os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
     os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
     os.environ.setdefault("AWS_SECURITY_TOKEN", "testing")
     os.environ.setdefault("AWS_SESSION_TOKEN", "testing")
     os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+    os.environ.setdefault("SOURCE_URL", "https://example.com/data.json")
     yield
 
 
@@ -54,8 +68,8 @@ def sample_records() -> list[dict]:
 
 
 @pytest.fixture()
-def sample_dataframe(sample_records) -> pd.DataFrame:
-    return pd.DataFrame(sample_records)
+def sample_dataframe(sample_records: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(sample_records)
 
 
 @pytest.fixture()

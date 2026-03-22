@@ -16,11 +16,10 @@ classifiers = [
 
 dependencies = [
     "boto3>=1.37.7",
+    "httpx>=0.28.0",
+    "jax>=0.4.35",
     "loguru>=0.7.3",
-    "numba>=0.61.0",
-    "numpy>=2.2.3",
-    "pandas>=2.2.3",
-    "pyarrow>=19.0.1",
+    "polars>=1.0.0",
     "pydantic>=2.10.6",
     "pydantic-settings>=2.8.1",
 ]
@@ -45,6 +44,7 @@ default-groups = ["dev"]
 dev = [
     "moto[s3]>=5.0.27",
     "pytest>=8.3.5",
+    "pytest-asyncio>=0.25.0",
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
     "pyrefly>=0.16.1",
@@ -62,17 +62,19 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # Pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "UP",  # pyupgrade
-    "S",   # flake8-bandit (security)
-    "ANN", # flake8-annotations
-    "N",   # pep8-naming
-    "RUF", # Ruff-specific rules
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # Pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+    "S",     # flake8-bandit (security)
+    "ANN",   # flake8-annotations
+    "N",     # pep8-naming
+    "A",     # flake8-builtins (catches shadowing built-ins like format)
+    "ASYNC", # flake8-async best practices
+    "RUF",   # Ruff-specific rules
 ]
 ignore = [
     "S101",   # Use of `assert` detected (needed in tests)
@@ -101,6 +103,7 @@ python_version = "3.12"
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 addopts = [
     "--cov=tcc_etl",
     "--cov-report=term-missing",

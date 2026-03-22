@@ -1,0 +1,31 @@
+# Secrets and environment files - MUST not enter the image
+.env
+.env.*
+
+# Version control
+.git/
+.gitignore
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Dev tooling and tests - not needed at runtime
+tests/
+notebooks/
+.pre-commit-config.yaml
+.ruff_cache/
+.pyrefly_cache/
+
+# Documentation
+*.md
+LICENSE

@@ -1,0 +1,24 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: ["main", "develop"]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Block PRs that introduce deps with moderate+ CVE severity
+          fail-on-severity: moderate
+          # Only allow permissive licenses (block GPL, AGPL, etc.)
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Python-2.0, PSF-2.0, Unlicense
+          comment-summary-in-pr: on-failure

@@ -109,3 +109,76 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+
+  # ---------------------------------------------------------------------------
+  # Dockerfile linting
+  # ---------------------------------------------------------------------------
+  hadolint:
+    name: Hadolint – Dockerfile Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint docker/Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile
+          failure-threshold: warning
+
+      - name: Lint docker/Dockerfile.pypy
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.pypy
+          failure-threshold: warning
+
+  # ---------------------------------------------------------------------------
+  # Dependency & filesystem CVE scan
+  # ---------------------------------------------------------------------------
+  trivy-fs:
+    name: Trivy – FS & Dependency Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy – scan filesystem (deps + secrets)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+
+  # ---------------------------------------------------------------------------
+  # Secret scanning across full git history
+  # ---------------------------------------------------------------------------
+  trufflehog:
+    name: TruffleHog – Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog OSS
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified

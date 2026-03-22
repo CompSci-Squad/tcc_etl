@@ -9,13 +9,13 @@ from typing import Any
 class BaseLoader(ABC):
     """Abstract base class for all loaders.
 
-    A loader receives the transformed data and persists it to a destination
-    (S3, database, filesystem, etc.).
+    A loader receives a transformed data batch and asynchronously persists it
+    to a destination (S3, database, filesystem, etc.).
     """
 
     @abstractmethod
-    def load(self, data: Any, key: str) -> None:  # noqa: ANN401
-        """Persist *data* to the destination identified by *key*.
+    async def load(self, data: Any, key: str) -> None:  # noqa: ANN401
+        """Asynchronously persist *data* to the destination identified by *key*.
 
         Parameters
         ----------

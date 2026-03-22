@@ -15,13 +15,13 @@ class BaseExtractor(ABC):
     """
 
     @abstractmethod
-    def extract(self) -> Any:  # noqa: ANN401
-        """Extract raw data from the source.
+    async def extract(self) -> Any:  # noqa: ANN401
+        """Asynchronously extract raw data from the source.
 
         Returns
         -------
         Any
             Raw data.  The concrete type depends on the extractor implementation
-            (e.g. ``list[dict]``, ``pd.DataFrame``, ``bytes``).
+            (e.g. ``list[dict]``, ``polars.DataFrame``, ``bytes``).
         """
         raise NotImplementedError

@@ -9,6 +9,7 @@ Run with::
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from loguru import logger
@@ -36,13 +37,22 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def main() -> None:
-    """Entry point for the ``tcc-etl`` CLI command."""
+async def _async_main() -> None:
+    """Async body of the ETL pipeline run."""
     settings = get_settings()
     _configure_logging(settings.log_level)
 
+    if not settings.source_url:
+        logger.error(
+            "SOURCE_URL is not configured. "
+            "Set it via the SOURCE_URL environment variable or .env file."
+        )
+        sys.exit(1)
+
     logger.info("tcc_etl starting up")
-    logger.debug("Settings: {}", settings.model_dump())
+    # Exclude secrets from debug log
+    safe_dump = settings.model_dump(exclude={"aws_access_key_id", "aws_secret_access_key"})
+    logger.debug("Settings: {}", safe_dump)
 
     pipeline = Pipeline(
         extractor=HttpExtractor(url=settings.source_url, as_json=True),
@@ -50,13 +60,18 @@ def main() -> None:
         loader=S3Loader(
             bucket=settings.s3_bucket_name,
             prefix=settings.s3_prefix,
-            format="parquet",
+            output_format="parquet",
         ),
         destination_key="output.parquet",
     )
 
-    pipeline.run()
-    logger.info("tcc_etl finished successfully")
+    batch_count = await pipeline.run()
+    logger.info("tcc_etl finished successfully - {} batch(es) uploaded", batch_count)
+
+
+def main() -> None:
+    """Entry point for the ``tcc-etl`` CLI command."""
+    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":

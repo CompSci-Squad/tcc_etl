@@ -1,0 +1,6 @@
+# Hadolint configuration — suppress rules that don't apply to this project.
+# See full rule list: https://github.com/hadolint/hadolint#rules
+
+ignore:
+  - DL3008  # apt-get: pin versions — acceptable in slim base images where apt is rarely used
+  - DL3009  # apt-get: delete lists in same layer — covered by our own cleanup pattern
