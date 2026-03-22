@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 – build / install dependencies with uv
 # ─────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Install uv (pinned version to prevent supply-chain drift)
 COPY --from=ghcr.io/astral-sh/uv:0.6.6 /uv /uvx /usr/local/bin/
@@ -22,7 +22,7 @@ RUN .venv/bin/python -m compileall src/
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 – lean runtime image
 # ─────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.title="tcc-etl" \
       org.opencontainers.image.description="High-performance Python ETL pipeline" \
