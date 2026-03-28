@@ -1,0 +1,85 @@
+name: Security
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  schedule:
+    - cron: "30 6 * * 1" # Weekly on Monday at 06:30 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Secret scanning ──────────────────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scanning (TruffleHog)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog OSS
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown
+
+  # ── Dependency CVE audit ─────────────────────────────────────────────────────
+  # pip-audit reads uv.lock directly — no project install needed.
+  # Complements dependency-review.yml, which only runs on PRs.
+  dependency-audit:
+    name: Dependency Audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - name: pip-audit
+        run: uvx pip-audit
+
+  # ── Container & filesystem scan ───────────────────────────────────────────────
+  # Scans Dockerfile, pyproject.toml, and IaC misconfigs BEFORE the build.
+  # Complements the post-build image scan already in cd.yml.
+  # Add CVE IDs to .trivyignore at repo root to suppress unfixable findings.
+  container-scan:
+    name: Filesystem & IaC Scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy — filesystem + IaC misconfig scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          scanners: vuln,misconfig,secret
+
+  # ── Supply-chain health ───────────────────────────────────────────────────────
+  scorecard:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    # Skipped on PR because the publish step needs id-token:write, which
+    # is not available in PRs from forks.
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: OSSF Scorecard
+        uses: ossf/scorecard-action@v2.4.3
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: false
+      - name: Upload Scorecard results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorecard-results
+          path: scorecard-results.sarif
+          retention-days: 5

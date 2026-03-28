@@ -22,6 +22,7 @@ jobs:
       contents: read
       packages: write
       security-events: write
+      id-token: write # required for OIDC auth to AWS
 
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +89,35 @@ jobs:
           artifact-name: sbom-cpython-${{ github.sha }}.spdx.json
           format: spdx-json
           upload-release-assets: true
+
+      # ── ECR push (Lambda deployment) — version tags only ─────────────────────
+      # Requires AWS one-time setup: OIDC identity provider + IAM role.
+      # GitHub repo secrets/vars needed:
+      #   Secret  AWS_OIDC_ROLE_ARN  – IAM role ARN (trust: refs/tags/*)
+      #   Secret  AWS_ACCOUNT_ID     – 12-digit AWS account ID
+      #   Var     AWS_REGION         – e.g. sa-east-1
+      #   Var     ECR_REPOSITORY     – e.g. tcc-etl
+      - name: Configure AWS credentials (OIDC)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push CPython image to ECR (arm64 — Lambda Graviton)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:${{ github.ref_name }}
+          cache-from: type=gha
 
   build-pypy-arm64:
     name: Build PyPy image (arm64)
