@@ -1,90 +1,173 @@
-"""Tests for the load package (S3Loader via moto)."""
+"""Tests for tcc_etl.loader — upsert_s3, validate_and_upload, and validators."""
 
 from __future__ import annotations
 
-import json
-from collections.abc import Generator
+import io
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 import boto3
 import polars as pl
 import pytest
 from moto import mock_aws
 
-from tcc_etl.load import S3Loader
+from tcc_etl.loader import (
+    upsert_s3,
+    validate_and_upload,
+    validate_hy_oas_gap,
+    validate_monthly_sparsity,
+    validate_no_weekends,
+)
 
 BUCKET = "test-etl-bucket"
-PREFIX = "data/"
+KEY = "panel_raw.parquet"
 
 
-@pytest.fixture()
-def _s3() -> Generator[None, None, None]:
-    """Start a moto S3 mock and create the test bucket."""
-    with mock_aws():
-        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket=BUCKET)
-        yield
+def _make_s3_client():
+    return boto3.client("s3", region_name="us-east-1")
 
 
-def _make_loader(fmt: str = "parquet") -> S3Loader:
-    return S3Loader(bucket=BUCKET, prefix=PREFIX, output_format=fmt)
+def _make_df(dates: list[date]) -> pl.DataFrame:
+    n = len(dates)
+    return pl.DataFrame({
+        "date": dates,
+        "VIXCLS":       [15.0] * n,
+        "DGS10":        [4.0] * n,
+        "DTB3":         [5.0] * n,
+        "BAMLH0A0HYM2": [3.0] * n,
+        "DCOILBRENTEU": [80.0] * n,
+        "CPIAUCSL":     [None] * n,
+        "FEDFUNDS":     [None] * n,
+        "INDPRO":       [None] * n,
+        "UNRATE":       [None] * n,
+        "^GSPC":        [5100.0] * n,
+        "DX-Y.NYB":     [104.0] * n,
+        "GC=F":         [3000.0] * n,
+    }).with_columns(pl.col("date").cast(pl.Date))
 
 
-class TestS3Loader:
-    async def test_load_dataframe_parquet(self, _s3) -> None:
-        loader = _make_loader("parquet")
-        df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
-        await loader.load(df, "test.parquet")
+# ── upsert_s3 ──────────────────────────────────────────────────────────────
 
-        s3 = boto3.client("s3", region_name="us-east-1")
-        obj = s3.get_object(Bucket=BUCKET, Key=f"{PREFIX}test.parquet")
-        assert obj["ResponseMetadata"]["HTTPStatusCode"] == 200
 
-    async def test_load_dataframe_csv(self, _s3) -> None:
-        loader = _make_loader("csv")
-        df = pl.DataFrame({"x": [10, 20]})
-        await loader.load(df, "test.csv")
+class TestUpsertS3:
+    def test_first_run_creates_file(self, s3_mock) -> None:
+        bucket, client = s3_mock
+        dates = [date(2026, 3, 25), date(2026, 3, 26)]
+        df = _make_df(dates)
 
-        s3 = boto3.client("s3", region_name="us-east-1")
-        obj = s3.get_object(Bucket=BUCKET, Key=f"{PREFIX}test.csv")
-        body = obj["Body"].read().decode()
-        assert "x" in body
+        with patch("tcc_etl.loader._s3", client):
+            total = upsert_s3(df, KEY, bucket)
 
-    async def test_load_bytes(self, _s3) -> None:
-        loader = _make_loader()
-        await loader.load(b"\x00\x01\x02", "raw.bin")
+        assert total == 2
+        obj = client.get_object(Bucket=bucket, Key=KEY)
+        result = pl.read_parquet(io.BytesIO(obj["Body"].read()))
+        assert len(result) == 2
 
-        s3 = boto3.client("s3", region_name="us-east-1")
-        obj = s3.get_object(Bucket=BUCKET, Key=f"{PREFIX}raw.bin")
-        assert obj["Body"].read() == b"\x00\x01\x02"
+    def test_incremental_merge_deduplicates(self, s3_mock) -> None:
+        bucket, client = s3_mock
 
-    async def test_load_json_fallback(self, _s3) -> None:
-        loader = _make_loader()
-        payload = {"key": "value", "num": 42}
-        await loader.load(payload, "data.json")
+        # First run
+        existing_dates = [date(2026, 3, 23), date(2026, 3, 24), date(2026, 3, 25)]
+        existing_df = _make_df(existing_dates)
+        with patch("tcc_etl.loader._s3", client):
+            upsert_s3(existing_df, KEY, bucket)
 
-        s3 = boto3.client("s3", region_name="us-east-1")
-        obj = s3.get_object(Bucket=BUCKET, Key=f"{PREFIX}data.json")
-        body = json.loads(obj["Body"].read())
-        assert body == payload
+        # Second run: overlaps on 2026-03-25, adds 2026-03-26/27
+        new_dates = [date(2026, 3, 25), date(2026, 3, 26), date(2026, 3, 27)]
+        new_df = _make_df(new_dates)
+        with patch("tcc_etl.loader._s3", client):
+            total = upsert_s3(new_df, KEY, bucket)
 
-    async def test_load_many_parallel(self, _s3) -> None:
-        loader = _make_loader()
-        items = [(b"chunk-1", "chunk1.bin"), (b"chunk-2", "chunk2.bin")]
-        await loader.load_many(items, max_workers=2)
+        # Expected: 2026-03-23, 2026-03-24 (kept) + 3 new rows = 5 total
+        assert total == 5
 
-        s3 = boto3.client("s3", region_name="us-east-1")
-        keys = [o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET)["Contents"]]
-        assert f"{PREFIX}chunk1.bin" in keys
-        assert f"{PREFIX}chunk2.bin" in keys
+    def test_output_is_sorted_by_date(self, s3_mock) -> None:
+        bucket, client = s3_mock
+        dates = [date(2026, 3, 27), date(2026, 3, 26), date(2026, 3, 25)]
+        df = _make_df(dates)
+        with patch("tcc_etl.loader._s3", client):
+            upsert_s3(df, KEY, bucket)
+        obj = client.get_object(Bucket=bucket, Key=KEY)
+        result = pl.read_parquet(io.BytesIO(obj["Body"].read()))
+        dates_out = result["date"].to_list()
+        assert dates_out == sorted(dates_out)
 
-    async def test_load_many_error_propagates(self, _s3) -> None:
-        """An upload failure in load_many must propagate immediately."""
-        from unittest.mock import patch
-        import botocore.exceptions
 
-        loader = _make_loader()
-        error = botocore.exceptions.ClientError(
-            {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "PutObject"
+# ── Post-validation helpers ────────────────────────────────────────────────
+
+
+class TestValidateMonthlySparsity:
+    def test_passes_with_sparse_data(self) -> None:
+        # 1 non-null out of 31 rows ~ 3.2% → valid
+        n = 31
+        df = pl.DataFrame({
+            "CPIAUCSL": [1.0] + [None] * (n - 1),
+            "FEDFUNDS": [1.0] + [None] * (n - 1),
+            "INDPRO":   [1.0] + [None] * (n - 1),
+            "UNRATE":   [1.0] + [None] * (n - 1),
+        })
+        validate_monthly_sparsity(df)  # should not raise
+
+    def test_fails_when_fully_populated(self) -> None:
+        n = 31
+        df = pl.DataFrame({
+            "CPIAUCSL": [1.0] * n,
+            "FEDFUNDS": [1.0] * n,
+            "INDPRO":   [1.0] * n,
+            "UNRATE":   [1.0] * n,
+        })
+        with pytest.raises(AssertionError, match="fill rate"):
+            validate_monthly_sparsity(df)
+
+
+class TestValidateNoWeekends:
+    def test_passes_with_business_days_only(self) -> None:
+        df = pl.DataFrame({
+            "date": [date(2026, 3, 23), date(2026, 3, 24), date(2026, 3, 25)]
+        }).with_columns(pl.col("date").cast(pl.Date))
+        validate_no_weekends(df)  # should not raise
+
+    def test_fails_with_weekend_date(self) -> None:
+        df = pl.DataFrame({
+            "date": [date(2026, 3, 21), date(2026, 3, 22)]  # Saturday, Sunday
+        }).with_columns(pl.col("date").cast(pl.Date))
+        with pytest.raises(AssertionError, match="weekend"):
+            validate_no_weekends(df)
+
+
+class TestValidateHyOasGap:
+    def test_passes_with_few_nulls_post_1997(self) -> None:
+        import pandas as pd
+        dates = list(pd.bdate_range("1997-01-01", periods=100).date)
+        df = pl.DataFrame({
+            "date": dates,
+            "BAMLH0A0HYM2": [3.0] * 100,
+        }).with_columns(pl.col("date").cast(pl.Date))
+        validate_hy_oas_gap(df)  # should not raise
+
+    def test_fails_with_too_many_nulls_post_1997(self) -> None:
+        import pandas as pd
+        dates = list(pd.bdate_range("1997-01-01", periods=300).date)
+        df = pl.DataFrame({
+            "date": dates,
+            "BAMLH0A0HYM2": [None] * 300,
+        }).with_columns(pl.col("date").cast(pl.Date))
+        with pytest.raises(AssertionError, match="unexpected nulls"):
+            validate_hy_oas_gap(df)
+
+
+# ── validate_and_upload ────────────────────────────────────────────────────
+
+
+class TestValidateAndUpload:
+    def test_pandera_error_propagates(self, s3_mock) -> None:
+        """A DataFrame violating the schema must raise SchemaError, not upload."""
+        import pandera.errors
+        bucket, client = s3_mock
+        # VIXCLS must be >= 8.0; pass 1.0 to trigger validation error
+        bad_df = _make_df([date(2026, 3, 25)]).with_columns(
+            pl.lit(1.0).cast(pl.Float64).alias("VIXCLS")
         )
-        with patch.object(loader._s3, "put_object", side_effect=error):
-            with pytest.raises(botocore.exceptions.ClientError):
-                await loader.load_many([(b"data", "file.bin")])
+        with patch("tcc_etl.loader._s3", client):
+            with pytest.raises(pandera.errors.SchemaError):
+                validate_and_upload(bad_df, KEY, bucket, schema="raw")

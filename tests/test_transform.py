@@ -1,94 +1,224 @@
-"""Tests for the transform package."""
+"""Tests for tcc_etl.transform — build_spine, assemble, transform_panel."""
 
 from __future__ import annotations
 
-import pytest
+import math
+from datetime import date
+
 import polars as pl
+import pytest
 
-from tcc_etl.transform import DataFrameTransformer, clip_column, normalize_column
+from tcc_etl.transform import (
+    _MONTHLY_COLS,
+    _PANEL_COLUMNS,
+    assemble,
+    build_spine,
+    transform_panel,
+)
 
-
-class TestNumericHelpers:
-    def test_normalize_column_basic(self) -> None:
-        result = normalize_column([0.0, 5.0, 10.0])
-        assert result[0] == pytest.approx(0.0)
-        assert result[1] == pytest.approx(0.5)
-        assert result[2] == pytest.approx(1.0)
-
-    def test_normalize_column_all_same(self) -> None:
-        result = normalize_column([3.0, 3.0, 3.0])
-        # When range is 0 every value maps to 0.0
-        assert all(v == pytest.approx(0.0) for v in result)
-
-    def test_normalize_column_empty(self) -> None:
-        assert normalize_column([]) == []
-
-    def test_clip_column(self) -> None:
-        result = clip_column([-1.0, 0.5, 2.0], 0.0, 1.0)
-        assert result[0] == pytest.approx(0.0)
-        assert result[1] == pytest.approx(0.5)
-        assert result[2] == pytest.approx(1.0)
-
-    def test_clip_column_empty(self) -> None:
-        assert clip_column([], 0.0, 1.0) == []
+START = "2026-03-23"
+END = "2026-03-27"
 
 
-class TestDataFrameTransformer:
-    def _collect(self, transformer: DataFrameTransformer, data) -> pl.DataFrame:
-        """Collect all batches from the transformer into a single DataFrame."""
-        batches = list(transformer.transform(data))
-        assert len(batches) > 0, "Transformer yielded no batches"
-        return pl.concat(batches)
+# ── build_spine ────────────────────────────────────────────────────────────
 
-    def test_drop_duplicates(self, sample_dataframe: pl.DataFrame) -> None:
-        transformer = DataFrameTransformer(drop_duplicates=True, dropna=False)
-        result = self._collect(transformer, sample_dataframe)
-        assert len(result) == 3  # one duplicate removed
 
-    def test_dropna(self) -> None:
-        df = pl.DataFrame({"a": [1.0, None, 3.0], "b": [4.0, 5.0, 6.0]})
-        transformer = DataFrameTransformer(drop_duplicates=False, dropna=True)
-        result = self._collect(transformer, df)
-        assert len(result) == 2
+class TestBuildSpine:
+    def test_no_weekends_in_output(self) -> None:
+        spine = build_spine("2026-03-01", "2026-03-31")
+        import pandas as pd
+        dates = pd.to_datetime(spine["date"].to_list())
+        assert (dates.dayofweek >= 5).sum() == 0
 
-    def test_normalize_cols(self, sample_dataframe: pl.DataFrame) -> None:
-        transformer = DataFrameTransformer(
-            normalize_cols=["value"],
-            drop_duplicates=True,
-            dropna=False,
+    def test_correct_business_day_count(self) -> None:
+        # March 23-27 is Mon-Fri = 5 business days
+        spine = build_spine(START, END)
+        assert len(spine) == 5
+
+    def test_date_dtype_is_pl_date(self) -> None:
+        spine = build_spine(START, END)
+        assert spine["date"].dtype == pl.Date
+
+    def test_single_column(self) -> None:
+        spine = build_spine(START, END)
+        assert spine.columns == ["date"]
+
+
+# ── assemble ───────────────────────────────────────────────────────────────
+
+
+def _make_series_df(col: str, dates: list[date], values: list[float | None]) -> pl.DataFrame:
+    return pl.DataFrame({"date": dates, col: values}).with_columns(
+        pl.col("date").cast(pl.Date),
+        pl.col(col).cast(pl.Float64),
+    )
+
+
+class TestAssemble:
+    def test_returns_13_columns(self) -> None:
+        spine = build_spine(START, END)
+        dates = spine["date"].to_list()
+        vals = [1.0] * 5
+
+        fred_data = {c: _make_series_df(c, dates, vals) for c in [
+            "VIXCLS", "DGS10", "DTB3", "BAMLH0A0HYM2", "DCOILBRENTEU",
+            "CPIAUCSL", "FEDFUNDS", "INDPRO", "UNRATE",
+        ]}
+        yahoo_data = {c: _make_series_df(c, dates, vals) for c in ["^GSPC", "GC=F", "DX-Y.NYB"]}
+
+        panel = assemble(spine, fred_data, yahoo_data)
+        assert panel.columns == _PANEL_COLUMNS
+
+    def test_all_non_date_cols_are_float64(self) -> None:
+        spine = build_spine(START, END)
+        dates = spine["date"].to_list()
+        vals = [1.0] * 5
+
+        fred_data = {c: _make_series_df(c, dates, vals) for c in [
+            "VIXCLS", "DGS10", "DTB3", "BAMLH0A0HYM2", "DCOILBRENTEU",
+            "CPIAUCSL", "FEDFUNDS", "INDPRO", "UNRATE",
+        ]}
+        yahoo_data = {c: _make_series_df(c, dates, vals) for c in ["^GSPC", "GC=F", "DX-Y.NYB"]}
+
+        panel = assemble(spine, fred_data, yahoo_data)
+        for col in panel.columns:
+            if col != "date":
+                assert panel[col].dtype == pl.Float64, f"{col} is not Float64"
+
+    def test_row_count_matches_spine(self) -> None:
+        spine = build_spine(START, END)
+        dates = spine["date"].to_list()
+        vals = [1.0] * 5
+        fred_data = {c: _make_series_df(c, dates, vals) for c in [
+            "VIXCLS", "DGS10", "DTB3", "BAMLH0A0HYM2", "DCOILBRENTEU",
+            "CPIAUCSL", "FEDFUNDS", "INDPRO", "UNRATE",
+        ]}
+        yahoo_data = {c: _make_series_df(c, dates, vals) for c in ["^GSPC", "GC=F", "DX-Y.NYB"]}
+        panel = assemble(spine, fred_data, yahoo_data)
+        assert len(panel) == len(spine)
+
+
+# ── transform_panel ────────────────────────────────────────────────────────
+
+
+def _build_panel_raw(n: int = 30) -> pl.DataFrame:
+    """Build a synthetic panel_raw with n business days."""
+    import pandas as pd
+    dates = list(pd.bdate_range("2026-01-01", periods=n).date)
+    # Price-like columns (must be >0 for log)
+    price_cols = {
+        "^GSPC":        [5000.0 + i for i in range(n)],
+        "GC=F":         [3000.0 + i for i in range(n)],
+        "DX-Y.NYB":     [104.0 + i * 0.01 for i in range(n)],
+        "DCOILBRENTEU": [80.0 + i * 0.1 for i in range(n)],
+    }
+    rate_cols = {
+        "VIXCLS":       [15.0 + i * 0.1 for i in range(n)],
+        "DGS10":        [4.0 + i * 0.01 for i in range(n)],
+        "DTB3":         [5.0 + i * 0.01 for i in range(n)],
+        "BAMLH0A0HYM2": [3.0 + i * 0.01 for i in range(n)],
+    }
+    # Monthly: only 1 non-null per month (~3.3% fill rate for 30 rows)
+    def _monthly(n: int) -> list:
+        return [100.0 if i % 21 == 0 else None for i in range(n)]
+
+    monthly_cols = {
+        "CPIAUCSL": _monthly(n),
+        "FEDFUNDS": _monthly(n),
+        "INDPRO":   _monthly(n),
+        "UNRATE":   _monthly(n),
+    }
+
+    return pl.DataFrame({
+        "date": dates,
+        **price_cols,
+        **rate_cols,
+        **monthly_cols,
+    }).with_columns(pl.col("date").cast(pl.Date)).select(_PANEL_COLUMNS)
+
+
+class TestTransformPanel:
+    def test_rule1_log_return_first_row_is_null(self) -> None:
+        panel = _build_panel_raw()
+        result = transform_panel(panel)
+        assert result["^GSPC"][0] is None
+
+    def test_rule1_log_return_values_correct(self) -> None:
+        panel = _build_panel_raw()
+        result = transform_panel(panel)
+        raw_vals = panel["^GSPC"].to_list()
+        expected = math.log(raw_vals[1] / raw_vals[0])
+        assert abs(result["^GSPC"][1] - expected) < 1e-10
+
+    def test_rule2_arith_diff_first_row_is_null(self) -> None:
+        panel = _build_panel_raw()
+        result = transform_panel(panel)
+        assert result["VIXCLS"][0] is None
+
+    def test_rule2_arith_diff_values_correct(self) -> None:
+        panel = _build_panel_raw()
+        result = transform_panel(panel)
+        raw_vals = panel["VIXCLS"].to_list()
+        expected = raw_vals[1] - raw_vals[0]
+        assert abs(result["VIXCLS"][1] - expected) < 1e-10
+
+    def test_rule3_monthly_cols_are_mostly_null(self) -> None:
+        """After masking, monthly cols must be ~96-97% null (2-8% filled)."""
+        # Use 100 rows for a realistic fill ratio
+        panel = _build_panel_raw(n=100)
+        result = transform_panel(panel)
+        for col in _MONTHLY_COLS:
+            n_total = len(result)
+            n_filled = result[col].drop_nulls().len()
+            pct = n_filled / n_total * 100
+            assert pct < 10, f"{col} fill rate {pct:.1f}% is too high; masking may be broken"
+
+    def test_rule3_mask_order_matters_regression(self) -> None:
+        """Verify that capturing masks AFTER ffill would produce wrong results.
+
+        If masks were captured after forward-fill, is_not_null() would return
+        True for all rows, and the re-masking step would have no effect —
+        monthly cols would be fully populated instead of sparse.
+
+        This test simulates the bug: ffill first, then capture mask.
+        The result should be all-non-null (bug) vs mostly-null (correct).
+        """
+        panel = _build_panel_raw(n=100)
+
+        # Simulate the WRONG order: capture mask AFTER ffill
+        panel_ffilled = panel.with_columns([
+            pl.col(c).forward_fill() for c in _MONTHLY_COLS
+        ])
+        wrong_masks = {c: panel_ffilled[c].is_not_null() for c in _MONTHLY_COLS}
+
+        # With wrong masks, re-masking restores nothing (all True)
+        import math as _math
+        panel_wrong = panel_ffilled.with_columns([
+            pl.col(c).log(base=_math.e).diff().alias(c)
+            for c in ["CPIAUCSL", "INDPRO"]
+        ] + [
+            pl.col(c).diff().alias(c)
+            for c in ["FEDFUNDS", "UNRATE"]
+        ])
+        panel_wrong = panel_wrong.with_columns([
+            pl.when(wrong_masks[c]).then(pl.col(c)).otherwise(None).alias(c)
+            for c in _MONTHLY_COLS
+        ])
+
+        # The wrong approach fills more rows (the bug)
+        wrong_fill_pct = panel_wrong["CPIAUCSL"].drop_nulls().len() / len(panel_wrong) * 100
+
+        # The correct approach fills very few rows
+        correct = transform_panel(panel)
+        correct_fill_pct = correct["CPIAUCSL"].drop_nulls().len() / len(correct) * 100
+
+        # Wrong approach should have higher fill rate — proves order matters
+        assert wrong_fill_pct > correct_fill_pct, (
+            "Mask order regression: wrong and correct approaches produced same fill rate. "
+            "The mask-before-ffill rule may be broken."
         )
-        result = self._collect(transformer, sample_dataframe)
-        assert result["value"].min() == pytest.approx(0.0)
-        assert result["value"].max() == pytest.approx(1.0)
 
-    def test_normalize_missing_col_is_skipped(self, sample_dataframe: pl.DataFrame) -> None:
-        transformer = DataFrameTransformer(
-            normalize_cols=["nonexistent"],
-            drop_duplicates=False,
-            dropna=False,
-        )
-        # Should not raise
-        result = self._collect(transformer, sample_dataframe)
-        assert result.columns == sample_dataframe.columns
-
-    def test_accepts_list_of_dicts(self, sample_records: list[dict]) -> None:
-        transformer = DataFrameTransformer()
-        result = self._collect(transformer, sample_records)
-        assert isinstance(result, pl.DataFrame)
-
-    def test_accepts_lazyframe(self, sample_dataframe: pl.DataFrame) -> None:
-        transformer = DataFrameTransformer(drop_duplicates=False, dropna=False)
-        result = self._collect(transformer, sample_dataframe.lazy())
-        assert isinstance(result, pl.DataFrame)
-
-    def test_unsupported_type_raises(self) -> None:
-        transformer = DataFrameTransformer()
-        with pytest.raises(TypeError, match="Unsupported data type"):
-            list(transformer.transform(b"raw bytes"))
-
-    def test_empty_dataframe_yields_no_rows(self) -> None:
-        df = pl.DataFrame({"a": [], "b": []})
-        transformer = DataFrameTransformer(drop_duplicates=False, dropna=False)
-        batches = list(transformer.transform(df))
-        total = sum(len(b) for b in batches)
-        assert total == 0
+    def test_output_has_same_columns_as_input(self) -> None:
+        panel = _build_panel_raw()
+        result = transform_panel(panel)
+        assert result.columns == _PANEL_COLUMNS

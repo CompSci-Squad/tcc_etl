@@ -1,98 +1,104 @@
-"""Tests for the extract package."""
+"""Tests for tcc_etl.extract — fetch_fred and fetch_yahoo."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+import os
+from unittest.mock import MagicMock, patch
 
+import pandas as pd
+import polars as pl
 import pytest
 
-from tcc_etl.extract import FileExtractor, HttpExtractor
+from tcc_etl.extract import FRED_SERIES, YAHOO_TICKERS, fetch_fred, fetch_yahoo
+
+START = "2026-03-24"
+END = "2026-03-31"
 
 
-class TestFileExtractor:
-    async def test_extract_json(self, json_file: Path) -> None:
-        extractor = FileExtractor(json_file)
-        result = await extractor.extract()
-        assert isinstance(result, list)
-        assert len(result) == 4
-        assert result[0]["id"] == 1
-
-    async def test_extract_csv(self, csv_file: Path) -> None:
-        extractor = FileExtractor(csv_file)
-        result = await extractor.extract()
-        assert isinstance(result, list)
-        assert len(result) == 3
-        assert result[0]["label"] == "a"
-
-    async def test_extract_binary(self, tmp_path: Path) -> None:
-        p = tmp_path / "data.bin"
-        p.write_bytes(b"\x00\x01\x02")
-        extractor = FileExtractor(p)
-        result = await extractor.extract()
-        assert isinstance(result, bytes)
-        assert result == b"\x00\x01\x02"
+def _make_fred_mock() -> MagicMock:
+    """Return a Fred mock whose get_series returns a 3-row pandas Series."""
+    mock_fred = MagicMock()
+    idx = pd.to_datetime(["2026-03-25", "2026-03-26", "2026-03-27"])
+    mock_fred.get_series.return_value = pd.Series([1.0, 2.0, 3.0], index=idx)
+    return mock_fred
 
 
-class TestHttpExtractor:
-    def _make_mock_client(self, *, json_data=None, content=None):
-        """Return a patched httpx.AsyncClient context manager."""
-        mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
-        if json_data is not None:
-            mock_response.json.return_value = json_data
-        if content is not None:
-            mock_response.content = content
+def _make_yf_download() -> pd.DataFrame:
+    """Return a mock yf.download result matching the expected shape."""
+    import numpy as np
 
-        mock_client = AsyncMock()
-        mock_client.get.return_value = mock_response
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = False
-        return mock_client, mock_response
+    idx = pd.to_datetime(["2026-03-25", "2026-03-26", "2026-03-27"])
+    idx = idx.tz_localize("UTC")
+    cols = pd.MultiIndex.from_product(
+        [["Close"], YAHOO_TICKERS], names=["Price", "Ticker"]
+    )
+    data = np.random.default_rng(0).uniform(100, 200, (3, len(YAHOO_TICKERS)))
+    return pd.DataFrame(data, index=idx, columns=cols)
 
-    def test_invalid_scheme_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported URL scheme"):
-            HttpExtractor("ftp://example.com/data.json")
 
-    def test_file_scheme_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported URL scheme"):
-            HttpExtractor("file:///etc/passwd")
+# ── fetch_fred ─────────────────────────────────────────────────────────────
 
-    async def test_extract_json(self) -> None:
-        payload = [{"id": 1, "val": 42}]
-        mock_client, _ = self._make_mock_client(json_data=payload)
 
-        with patch("tcc_etl.extract.http_extractor.httpx.AsyncClient", return_value=mock_client):
-            extractor = HttpExtractor("http://example.com/data.json")
-            result = await extractor.extract()
+class TestFetchFred:
+    def test_returns_all_series_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRED_API_KEY", "test-key")
+        with patch("tcc_etl.extract.Fred", return_value=_make_fred_mock()):
+            result = fetch_fred(START, END)
+        assert set(result.keys()) == set(FRED_SERIES)
 
-        assert result == payload
+    def test_each_df_has_correct_columns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRED_API_KEY", "test-key")
+        with patch("tcc_etl.extract.Fred", return_value=_make_fred_mock()):
+            result = fetch_fred(START, END)
+        for series_id, df in result.items():
+            assert "date" in df.columns
+            assert series_id in df.columns
 
-    async def test_extract_bytes(self) -> None:
-        raw = b"hello bytes"
-        mock_client, _ = self._make_mock_client(content=raw)
+    def test_date_dtype_is_pl_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRED_API_KEY", "test-key")
+        with patch("tcc_etl.extract.Fred", return_value=_make_fred_mock()):
+            result = fetch_fred(START, END)
+        for df in result.values():
+            assert df["date"].dtype == pl.Date
 
-        with patch("tcc_etl.extract.http_extractor.httpx.AsyncClient", return_value=mock_client):
-            extractor = HttpExtractor("http://example.com/data.bin", as_json=False)
-            result = await extractor.extract()
+    def test_series_dtype_is_float64(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRED_API_KEY", "test-key")
+        with patch("tcc_etl.extract.Fred", return_value=_make_fred_mock()):
+            result = fetch_fred(START, END)
+        for series_id, df in result.items():
+            assert df[series_id].dtype == pl.Float64
 
-        assert result == raw
+    def test_missing_api_key_raises_key_error(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "FRED_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(KeyError):
+                fetch_fred(START, END)
 
-    async def test_http_error_propagates(self) -> None:
-        import httpx
 
-        # raise_for_status is called synchronously, so use MagicMock for the response
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "404", request=MagicMock(), response=MagicMock()
-        )
+# ── fetch_yahoo ────────────────────────────────────────────────────────────
 
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = False
-        mock_client.get.return_value = mock_response
 
-        with patch("tcc_etl.extract.http_extractor.httpx.AsyncClient", return_value=mock_client):
-            extractor = HttpExtractor("https://example.com/missing")
-            with pytest.raises(httpx.HTTPStatusError):
-                await extractor.extract()
+class TestFetchYahoo:
+    def test_returns_all_ticker_keys(self) -> None:
+        with patch("tcc_etl.extract.yf.download", return_value=_make_yf_download()):
+            result = fetch_yahoo(START, END)
+        assert set(result.keys()) == set(YAHOO_TICKERS)
+
+    def test_each_df_has_date_and_ticker_columns(self) -> None:
+        with patch("tcc_etl.extract.yf.download", return_value=_make_yf_download()):
+            result = fetch_yahoo(START, END)
+        for ticker, df in result.items():
+            assert "date" in df.columns
+            assert ticker in df.columns
+
+    def test_date_dtype_is_pl_date(self) -> None:
+        with patch("tcc_etl.extract.yf.download", return_value=_make_yf_download()):
+            result = fetch_yahoo(START, END)
+        for df in result.values():
+            assert df["date"].dtype == pl.Date
+
+    def test_ticker_dtype_is_float64(self) -> None:
+        with patch("tcc_etl.extract.yf.download", return_value=_make_yf_download()):
+            result = fetch_yahoo(START, END)
+        for ticker, df in result.items():
+            assert df[ticker].dtype == pl.Float64

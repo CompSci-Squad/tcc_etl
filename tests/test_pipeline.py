@@ -1,87 +1,94 @@
-"""Tests for the ETL Pipeline orchestrator."""
+"""Tests for tcc_etl.main.handler — Lambda entrypoint."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+import os
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
 
-from tcc_etl.pipeline import Pipeline
+
+@pytest.fixture()
+def _env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S3_BUCKET_NAME", "test-bucket")
+    monkeypatch.setenv("FRED_API_KEY", "test-key")
+    monkeypatch.setenv("PANEL_RAW_KEY", "panel_raw.parquet")
+    monkeypatch.setenv("PANEL_TRANSFORMED_KEY", "panel_transformed.parquet")
 
 
-def _make_pipeline(
-    *,
-    extract_return=None,
-    batches: list | None = None,
-) -> tuple[Pipeline, AsyncMock, MagicMock, AsyncMock]:
-    extractor = AsyncMock()
-    extractor.extract.return_value = extract_return or {"raw": "data"}
-
-    default_batch = pl.DataFrame({"transformed": [1, 2]})
-    transformer = MagicMock()
-    transformer.transform.return_value = iter(batches if batches is not None else [default_batch])
-
-    loader = AsyncMock()
-
-    pipeline = Pipeline(
-        extractor=extractor,
-        transformer=transformer,
-        loader=loader,
-        destination_key="output.parquet",
+def _make_dummy_df() -> pl.DataFrame:
+    return pl.DataFrame({"date": [date(2026, 3, 25)]}).with_columns(
+        pl.col("date").cast(pl.Date)
     )
-    return pipeline, extractor, transformer, loader
 
 
-class TestPipeline:
-    async def test_run_calls_all_steps(self) -> None:
-        batch = pl.DataFrame({"transformed": [1, 2]})
-        pipeline, extractor, transformer, loader = _make_pipeline(batches=[batch])
+class TestHandler:
+    def test_returns_required_keys(self, _env: None) -> None:
+        dummy_df = _make_dummy_df()
 
-        batch_count = await pipeline.run()
+        with (
+            patch("tcc_etl.main.fetch_fred", return_value={}),
+            patch("tcc_etl.main.fetch_yahoo", return_value={}),
+            patch("tcc_etl.main.build_spine", return_value=dummy_df),
+            patch("tcc_etl.main.assemble", return_value=dummy_df),
+            patch("tcc_etl.main.transform_panel", return_value=dummy_df),
+            patch("tcc_etl.main.validate_and_upload", return_value=100),
+        ):
+            from tcc_etl.main import handler
+            result = handler({}, None)
 
-        extractor.extract.assert_awaited_once()
-        transformer.transform.assert_called_once_with({"raw": "data"})
-        loader.load.assert_awaited_once_with(batch, "output_part0000.parquet")
-        assert batch_count == 1
+        assert result["statusCode"] == 200
+        assert "rows_in_panel" in result
+        assert "rows_added" in result
+        assert "panel_raw_key" in result
+        assert "panel_transformed_key" in result
 
-    async def test_run_multiple_batches(self) -> None:
-        batches = [pl.DataFrame({"a": [1]}), pl.DataFrame({"a": [2]}), pl.DataFrame({"a": [3]})]
-        pipeline, _, _, loader = _make_pipeline(batches=batches)
+    def test_rows_added_equals_len_transformed(self, _env: None) -> None:
+        dummy_df = _make_dummy_df()
 
-        batch_count = await pipeline.run()
+        with (
+            patch("tcc_etl.main.fetch_fred", return_value={}),
+            patch("tcc_etl.main.fetch_yahoo", return_value={}),
+            patch("tcc_etl.main.build_spine", return_value=dummy_df),
+            patch("tcc_etl.main.assemble", return_value=dummy_df),
+            patch("tcc_etl.main.transform_panel", return_value=dummy_df),
+            patch("tcc_etl.main.validate_and_upload", return_value=50),
+        ):
+            from tcc_etl.main import handler
+            result = handler({}, None)
 
-        assert batch_count == 3
-        keys = [call.args[1] for call in loader.load.await_args_list]
-        assert keys == ["output_part0000.parquet", "output_part0001.parquet", "output_part0002.parquet"]
+        assert result["rows_added"] == len(dummy_df)
+        assert result["rows_in_panel"] == 50
 
-    async def test_run_propagates_extractor_error(self) -> None:
-        pipeline, extractor, transformer, loader = _make_pipeline()
-        extractor.extract.side_effect = RuntimeError("network down")
+    def test_extraction_error_propagates(self, _env: None) -> None:
+        """Exceptions must not be swallowed — Lambda needs them to mark failure."""
+        with patch("tcc_etl.main.fetch_fred", side_effect=RuntimeError("FRED down")):
+            from tcc_etl.main import handler
+            with pytest.raises(RuntimeError, match="FRED down"):
+                handler({}, None)
 
-        with pytest.raises(RuntimeError, match="network down"):
-            await pipeline.run()
+    def test_uses_default_key_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("S3_BUCKET_NAME", "test-bucket")
+        monkeypatch.setenv("FRED_API_KEY", "test-key")
+        monkeypatch.delenv("PANEL_RAW_KEY", raising=False)
+        monkeypatch.delenv("PANEL_TRANSFORMED_KEY", raising=False)
 
-        transformer.transform.assert_not_called()
-        loader.load.assert_not_awaited()
+        import importlib
+        import tcc_etl.main as m
+        importlib.reload(m)  # re-evaluate module-level constants with updated env
 
-    async def test_run_propagates_transformer_error(self) -> None:
-        pipeline, _extractor, transformer, loader = _make_pipeline()
-        transformer.transform.side_effect = ValueError("bad data")
+        dummy_df = _make_dummy_df()
+        with (
+            patch.object(m, "fetch_fred", return_value={}),
+            patch.object(m, "fetch_yahoo", return_value={}),
+            patch.object(m, "build_spine", return_value=dummy_df),
+            patch.object(m, "assemble", return_value=dummy_df),
+            patch.object(m, "transform_panel", return_value=dummy_df),
+            patch.object(m, "validate_and_upload", return_value=10),
+        ):
+            result = m.handler({}, None)
 
-        with pytest.raises(ValueError, match="bad data"):
-            await pipeline.run()
-
-        loader.load.assert_not_awaited()
-
-    async def test_run_propagates_loader_error(self) -> None:
-        pipeline, _extractor, _transformer, loader = _make_pipeline()
-        loader.load.side_effect = OSError("S3 unavailable")
-
-        with pytest.raises(OSError, match="S3 unavailable"):
-            await pipeline.run()
-
-    def test_batch_key_format(self) -> None:
-        assert Pipeline._batch_key("output", ".parquet", 0) == "output_part0000.parquet"
-        assert Pipeline._batch_key("output", ".parquet", 42) == "output_part0042.parquet"
-        assert Pipeline._batch_key("data", ".csv", 9999) == "data_part9999.csv"
+        assert result["panel_raw_key"] == "panel_raw.parquet"
+        assert result["panel_transformed_key"] == "panel_transformed.parquet"

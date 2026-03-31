@@ -26,6 +26,11 @@ notebooks/
 .ruff_cache/
 .pyrefly_cache/
 
+# Project config — not needed inside Lambda container
+docker-compose.yml
+pyproject.toml
+uv.lock
+
 # Documentation
 *.md
 LICENSE

@@ -16,16 +16,12 @@ classifiers = [
 
 dependencies = [
     "boto3>=1.37.7",
-    "httpx>=0.28.0",
-    "jax>=0.4.35",
-    "loguru>=0.7.3",
+    "fredapi>=0.5",
+    "pandera[polars]>=0.20",
     "polars>=1.0.0",
-    "pydantic>=2.10.6",
-    "pydantic-settings>=2.8.1",
+    "python-dotenv>=1.0",
+    "yfinance>=0.2",
 ]
-
-[project.scripts]
-tcc-etl = "tcc_etl.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -44,12 +40,9 @@ default-groups = ["dev"]
 dev = [
     "moto[s3]>=5.0.27",
     "pytest>=8.3.5",
-    "pytest-asyncio>=0.25.0",
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
-    "pyrefly>=0.16.1",
     "ruff>=0.9.10",
-    "taskipy>=1.14.1",
 ]
 
 # ---------------------------------------------------------------------------
@@ -94,16 +87,11 @@ skip-magic-trailing-comma = false
 # ---------------------------------------------------------------------------
 # pyrefly (type checking)
 # ---------------------------------------------------------------------------
-[tool.pyrefly]
-project_includes = ["src"]
-python_version = "3.12"
-
 # ---------------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 addopts = [
     "--cov=tcc_etl",
     "--cov-report=term-missing",

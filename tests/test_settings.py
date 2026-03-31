@@ -1,41 +1,44 @@
-"""Tests for application settings."""
+"""Tests for environment variable configuration used by the Lambda handler."""
 
 from __future__ import annotations
 
+import importlib
+import os
+from unittest.mock import patch
+
 import pytest
 
-from tcc_etl.config import Settings, get_settings
 
+class TestEnvConfig:
+    def test_missing_s3_bucket_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("S3_BUCKET_NAME", raising=False)
+        monkeypatch.setenv("FRED_API_KEY", "test-key")
+        import tcc_etl.main as m
+        with pytest.raises(KeyError):
+            importlib.reload(m)
 
-class TestSettings:
-    def test_defaults(self) -> None:
-        s = Settings()
-        assert s.aws_region == "us-east-1"
-        assert s.s3_bucket_name == "tcc-etl-bucket"
-        assert s.batch_size == 10_000
-        assert s.max_workers == 4
-        # Secrets should be SecretStr instances, not plain strings
-        from pydantic import SecretStr
+    def test_panel_raw_key_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("S3_BUCKET_NAME", "bucket")
+        monkeypatch.setenv("FRED_API_KEY", "key")
+        monkeypatch.delenv("PANEL_RAW_KEY", raising=False)
+        import tcc_etl.main as m
+        importlib.reload(m)
+        assert m.RAW_KEY == "panel_raw.parquet"
 
-        assert isinstance(s.aws_access_key_id, SecretStr)
-        assert isinstance(s.aws_secret_access_key, SecretStr)
+    def test_panel_transformed_key_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("S3_BUCKET_NAME", "bucket")
+        monkeypatch.setenv("FRED_API_KEY", "key")
+        monkeypatch.delenv("PANEL_TRANSFORMED_KEY", raising=False)
+        import tcc_etl.main as m
+        importlib.reload(m)
+        assert m.TRANSFORMED_KEY == "panel_transformed.parquet"
 
-    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("S3_BUCKET_NAME", "my-bucket")
-        monkeypatch.setenv("AWS_REGION", "eu-west-1")
-        # cache must be cleared so the new env vars are picked up
-        get_settings.cache_clear()
-        s = get_settings()
-        assert s.s3_bucket_name == "my-bucket"
-        assert s.aws_region == "eu-west-1"
-
-    def test_get_settings_returns_singleton(self) -> None:
-        s1 = get_settings()
-        s2 = get_settings()
-        assert s1 is s2
-
-    def test_secrets_not_exposed_in_repr(self) -> None:
-        s = Settings()
-        # repr / str of SecretStr must NOT expose the actual value
-        assert "**" in repr(s.aws_access_key_id)
-        assert "**" in repr(s.aws_secret_access_key)
+    def test_missing_fred_api_key_raises_on_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("S3_BUCKET_NAME", "bucket")
+        env = {k: v for k, v in os.environ.items() if k != "FRED_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            from tcc_etl.extract import fetch_fred
+            with pytest.raises(KeyError):
+                fetch_fred("2026-03-24", "2026-03-31")
