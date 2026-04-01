@@ -101,13 +101,10 @@ def validate_no_weekends(df: pl.DataFrame) -> None:
     AssertionError
         If any weekend date is found.
     """
-    import pandas as pd  # noqa: PLC0415 — lazy import, pandas is a yfinance dep
-
-    dates = pd.to_datetime(df["date"].to_list())
-    n_weekend = int((dates.dayofweek >= 5).sum())
+    n_weekend = df.filter(pl.col("date").dt.weekday() > 5).height
     assert n_weekend == 0, (
         f"Found {n_weekend} weekend date(s) in the panel spine. "
-        "Ensure build_spine uses pd.bdate_range."
+        "Ensure build_spine excludes weekends."
     )
 
 

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import math
 
-import pandas as pd
+from datetime import date
+
 import polars as pl
 
 # ── Column groupings (locked) ──────────────────────────────────────────────
@@ -49,6 +50,9 @@ _PANEL_COLUMNS: list[str] = [
 ]
 
 
+# Batch size for collect_batches in transform_panel
+_BATCH_SIZE: int = 5_000
+
 # ── Public API ─────────────────────────────────────────────────────────────
 
 
@@ -65,9 +69,12 @@ def build_spine(start: str, end: str) -> pl.DataFrame:
     pl.DataFrame
         Single column ``date`` with dtype ``pl.Date``, no weekends.
     """
-    bdays = pd.bdate_range(start, end)
-    return pl.from_pandas(pd.DataFrame({"date": bdays})).with_columns(
-        pl.col("date").cast(pl.Date)
+    start_date = date.fromisoformat(start)
+    end_date = date.fromisoformat(end)
+    return (
+        pl.date_range(start=start_date, end=end_date, interval="1d", eager=True)
+        .to_frame("date")
+        .filter(pl.col("date").dt.weekday() <= 5)
     )
 
 
@@ -93,14 +100,14 @@ def assemble(
         ``panel_raw`` with 13 columns (date + 12 series) in canonical order.
         All non-date columns are ``pl.Float64``.
     """
-    panel = spine
     all_series = {**fred_data, **yahoo_data}
+    lf = spine.lazy()
 
     for col in _PANEL_COLUMNS[1:]:  # skip "date"
         if col in all_series:
-            panel = panel.join(all_series[col], on="date", how="left")
+            lf = lf.join(all_series[col].lazy(), on="date", how="left")
 
-    return panel.select(_PANEL_COLUMNS)
+    return lf.select(_PANEL_COLUMNS).collect()
 
 
 def transform_panel(panel_raw: pl.DataFrame) -> pl.DataFrame:
@@ -123,47 +130,50 @@ def transform_panel(panel_raw: pl.DataFrame) -> pl.DataFrame:
         ``panel_transformed`` with the same 13 columns.
         Monthly series will be ~96–97% null by design.
     """
-    panel = panel_raw.clone()
-
-    # ── Rule 1: log-return ────────────────────────────────────────────────
-    panel = panel.with_columns([
-        pl.col(c).log(base=math.e).diff().alias(c)
-        for c in _LOG_RETURN_COLS
-    ])
-
-    # ── Rule 2: arithmetic first-difference ───────────────────────────────
-    panel = panel.with_columns([
-        pl.col(c).diff().alias(c)
-        for c in _ARITH_DIFF_COLS
-    ])
-
-    # ── Rule 3: monthly pointwise masking (4-step, exact order) ───────────
-
-    # Step 1: capture publication masks BEFORE any forward-fill.
-    # Must use panel_raw (the untouched input), not `panel` which already
-    # has Rules 1+2 applied. The mask records which dates had observed values.
+    # ── Rule 3 Step 1: capture publication masks BEFORE any forward-fill ──
+    # Must use panel_raw (the untouched input). The mask records which dates
+    # had observed values.
     pub_masks: dict[str, pl.Series] = {
         c: panel_raw[c].is_not_null()
         for c in _MONTHLY_COLS
     }
 
-    # Step 2: forward-fill monthly series so diffs can be computed.
-    panel = panel.with_columns([
+    # Build a lazy chain for Rules 1 + 2 + Rule 3 Steps 2 + 3
+    lf = panel_raw.lazy()
+
+    # ── Rule 1: log-return ────────────────────────────────────────────────
+    lf = lf.with_columns([
+        pl.col(c).log(base=math.e).diff().alias(c)
+        for c in _LOG_RETURN_COLS
+    ])
+
+    # ── Rule 2: arithmetic first-difference ───────────────────────────────
+    lf = lf.with_columns([
+        pl.col(c).diff().alias(c)
+        for c in _ARITH_DIFF_COLS
+    ])
+
+    # ── Rule 3 Step 2: forward-fill monthly series ────────────────────────
+    lf = lf.with_columns([
         pl.col(c).forward_fill()
         for c in _MONTHLY_COLS
     ])
 
-    # Step 3: apply transformations.
-    panel = panel.with_columns([
+    # ── Rule 3 Step 3: apply transformations ─────────────────────────────
+    lf = lf.with_columns([
         pl.col(c).log(base=math.e).diff().alias(c)
         for c in _MONTHLY_LOG_RETURN
     ])
-    panel = panel.with_columns([
+    lf = lf.with_columns([
         pl.col(c).diff().alias(c)
         for c in _MONTHLY_ARITH_DIFF
     ])
 
-    # Step 4: re-mask to publication dates only.
+    # Collect via batches
+    chunks = list(lf.collect_batches(chunk_size=_BATCH_SIZE))
+    panel = pl.concat(chunks) if chunks else lf.collect()
+
+    # ── Rule 3 Step 4: re-mask to publication dates only ─────────────────
     # After this step, monthly columns will be ~96–97% null. This is correct.
     # Do NOT forward-fill after this point — the model handles sparse inputs.
     panel = panel.with_columns([

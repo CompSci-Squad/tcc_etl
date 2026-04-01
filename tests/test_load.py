@@ -137,8 +137,14 @@ class TestValidateNoWeekends:
 
 class TestValidateHyOasGap:
     def test_passes_with_few_nulls_post_1997(self) -> None:
-        import pandas as pd
-        dates = list(pd.bdate_range("1997-01-01", periods=100).date)
+        from datetime import date, timedelta
+        d = date(1997, 1, 6)  # first Monday on/after 1997-01-01
+        bdays: list[date] = []
+        while len(bdays) < 100:
+            if d.weekday() < 5:
+                bdays.append(d)
+            d += timedelta(days=1)
+        dates = bdays
         df = pl.DataFrame({
             "date": dates,
             "BAMLH0A0HYM2": [3.0] * 100,
@@ -146,8 +152,14 @@ class TestValidateHyOasGap:
         validate_hy_oas_gap(df)  # should not raise
 
     def test_fails_with_too_many_nulls_post_1997(self) -> None:
-        import pandas as pd
-        dates = list(pd.bdate_range("1997-01-01", periods=300).date)
+        from datetime import date, timedelta
+        d = date(1997, 1, 6)  # first Monday on/after 1997-01-01
+        bdays: list[date] = []
+        while len(bdays) < 300:
+            if d.weekday() < 5:
+                bdays.append(d)
+            d += timedelta(days=1)
+        dates = bdays
         df = pl.DataFrame({
             "date": dates,
             "BAMLH0A0HYM2": [None] * 300,

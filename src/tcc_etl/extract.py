@@ -104,14 +104,12 @@ def fetch_yahoo(start: str, end: str) -> dict[str, pl.DataFrame]:
     result: dict[str, pl.DataFrame] = {}
 
     for ticker in YAHOO_TICKERS:
-        series = close[ticker].reset_index()
-        series.columns = ["date", ticker]
-        df = (
-            pl.from_pandas(series)
-            .with_columns(
-                pl.col("date").cast(pl.Date),
-                pl.col(ticker).cast(pl.Float64),
-            )
+        ticker_col = close[ticker]
+        df = pl.DataFrame(
+            {"date": ticker_col.index.to_list(), ticker: ticker_col.values.tolist()}
+        ).with_columns(
+            pl.col("date").cast(pl.Date),
+            pl.col(ticker).cast(pl.Float64),
         )
         result[ticker] = df
 

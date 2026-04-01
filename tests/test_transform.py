@@ -26,9 +26,7 @@ END = "2026-03-27"
 class TestBuildSpine:
     def test_no_weekends_in_output(self) -> None:
         spine = build_spine("2026-03-01", "2026-03-31")
-        import pandas as pd
-        dates = pd.to_datetime(spine["date"].to_list())
-        assert (dates.dayofweek >= 5).sum() == 0
+        assert spine.filter(pl.col("date").dt.weekday() > 5).height == 0
 
     def test_correct_business_day_count(self) -> None:
         # March 23-27 is Mon-Fri = 5 business days
@@ -103,8 +101,14 @@ class TestAssemble:
 
 def _build_panel_raw(n: int = 30) -> pl.DataFrame:
     """Build a synthetic panel_raw with n business days."""
-    import pandas as pd
-    dates = list(pd.bdate_range("2026-01-01", periods=n).date)
+    from datetime import timedelta
+    d = date(2026, 1, 5)  # first Monday of 2026
+    bdays: list[date] = []
+    while len(bdays) < n:
+        if d.weekday() < 5:
+            bdays.append(d)
+        d += timedelta(days=1)
+    dates = bdays
     # Price-like columns (must be >0 for log)
     price_cols = {
         "^GSPC":        [5000.0 + i for i in range(n)],
