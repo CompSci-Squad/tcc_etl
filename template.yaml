@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 1024
+    Architectures:
+      - arm64
+
+Resources:
+  TccEtlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref TccEtlBucket
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub "arn:aws:s3:::${TccEtlBucket}/*"
+      Events:
+        MonthlySchedule:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 22 20 * ? *)"
+            Description: "Run FRED-MD ETL monthly on the 20th at 22:00 UTC"
+    Metadata:
+      DockerContext: .
+      Dockerfile: docker/Dockerfile
+
+  TccEtlBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "tcc-etl-${AWS::AccountId}-${AWS::Region}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+
+Outputs:
+  BucketName:
+    Value: !Ref TccEtlBucket
+  FunctionName:
+    Value: !Ref TccEtlFunction
+  FunctionArn:
+    Value: !GetAtt TccEtlFunction.Arn

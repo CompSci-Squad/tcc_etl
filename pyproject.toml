@@ -33,14 +33,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tcc_etl"]
 
-# ---------------------------------------------------------------------------
-# uv
-# ---------------------------------------------------------------------------
 [tool.uv]
 default-groups = ["dev"]
 
 [dependency-groups]
 dev = [
+    "aws-sam-cli",
     "moto[s3]>=5.0.27",
     "pyrefly>=0.16.1",
     "pytest>=8.3.5",
@@ -48,11 +46,10 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.9.10",
+    "taskipy>=1.14",
 ]
 
-# ---------------------------------------------------------------------------
-# ruff
-# ---------------------------------------------------------------------------
+
 [tool.ruff]
 src = ["src"]
 line-length = 100
@@ -89,12 +86,7 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 
-# ---------------------------------------------------------------------------
-# pyrefly (type checking)
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# pytest
-# ---------------------------------------------------------------------------
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -107,9 +99,6 @@ addopts = [
 ]
 pythonpath = ["src"]
 
-# ---------------------------------------------------------------------------
-# coverage
-# ---------------------------------------------------------------------------
 [tool.coverage.run]
 source = ["tcc_etl"]
 omit = ["tests/*", "src/tcc_etl/__init__.py"]
@@ -123,9 +112,7 @@ exclude_lines = [
     "raise NotImplementedError",
 ]
 
-# ---------------------------------------------------------------------------
-# taskipy
-# ---------------------------------------------------------------------------
+
 [tool.taskipy.tasks]
 lint      = { cmd = "ruff check src tests",              help = "Run ruff linter" }
 fmt       = { cmd = "ruff format src tests",             help = "Format code with ruff" }
@@ -133,5 +120,11 @@ fmt-check = { cmd = "ruff format --check src tests",     help = "Check formattin
 typecheck = { cmd = "pyrefly check",                     help = "Run pyrefly type checker" }
 test      = { cmd = "pytest",                            help = "Run tests with coverage" }
 test-fast = { cmd = "pytest --no-cov -x",               help = "Run tests quickly (no coverage)" }
+sam-build  = { cmd = "uv run sam build",                                                                            help = "Build Lambda image with SAM" }
+sam-invoke = { cmd = "uv run sam local invoke TccEtlFunction -e events/invoke.json",                               help = "Invoke Lambda locally with SAM (no LocalStack)" }
+sam-local  = { cmd = "docker compose up -d localstack && uv run sam local invoke TccEtlFunction -e events/invoke.json --env-vars env.json", help = "Invoke Lambda locally against LocalStack" }
+sam-deploy = { cmd = "uv run sam deploy",                                                                          help = "Deploy stack to AWS via SAM" }
+local-down = { cmd = "docker compose down -v",                                                                     help = "Stop and remove local containers and volumes" }
+local-logs = { cmd = "docker compose logs -f localstack",                                                          help = "Tail LocalStack logs" }
 ci        = { cmd = "task lint && task fmt-check && task test", help = "Full CI check: lint + format + test" }
 all       = { cmd = "task fmt && task lint && task typecheck && task test", help = "Format, lint, typecheck, and test" }

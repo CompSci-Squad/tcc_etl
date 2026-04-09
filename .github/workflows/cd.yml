@@ -1,8 +1,7 @@
-name: CD – Build & Push Docker Images
+name: CD – Deploy via AWS SAM
 
 on:
   push:
-    branches: ["main"]
     tags: ["v*.*.*"]
   workflow_dispatch:
 
@@ -10,65 +9,41 @@ concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
 jobs:
-  build-cpython:
-    name: Build CPython image (amd64 + arm64)
+  deploy:
+    name: SAM build & deploy (arm64)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
       security-events: write
-      id-token: write # required for OIDC auth to AWS
+      id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Set up QEMU (cross-platform emulation)
-        uses: docker/setup-qemu-action@v3
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install project dependencies (including aws-sam-cli)
+        run: uv sync --frozen
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push CPython image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: SAM build
+        run: uv run sam build
 
       - name: Trivy – scan built image
-        if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: image
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          image-ref: "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:${{ github.ref_name }}"
           format: sarif
           output: trivy-image.sarif
           severity: CRITICAL,HIGH
@@ -76,38 +51,14 @@ jobs:
           vuln-type: os,library
 
       - name: Upload image scan SARIF
-        if: github.event_name != 'pull_request'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-image.sarif
 
-      - name: Generate SBOM (Syft)
-        if: github.event_name != 'pull_request'
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          artifact-name: sbom-cpython-${{ github.sha }}.spdx.json
-          format: spdx-json
-          upload-release-assets: true
-
-      - name: Configure AWS credentials (OIDC)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Log in to ECR
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push CPython image to ECR (arm64 — Lambda Graviton)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/arm64
-          push: true
-          tags: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:${{ github.ref_name }}
-          cache-from: type=gha
+      - name: SAM deploy
+        run: |
+          uv run sam deploy \
+            --region ${{ vars.AWS_REGION }} \
+            --image-repositories "TccEtlFunction=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}" \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset

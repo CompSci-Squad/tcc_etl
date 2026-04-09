@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,7 +44,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -73,7 +73,7 @@ jobs:
         python-version: ["3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -110,16 +110,13 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
-  # ---------------------------------------------------------------------------
-  # Dockerfile linting
-  # ---------------------------------------------------------------------------
   hadolint:
-    name: Hadolint – Dockerfile Lint
+    name: Hadolint Dockerfile Lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Lint docker/Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
@@ -127,19 +124,17 @@ jobs:
           dockerfile: docker/Dockerfile
           failure-threshold: warning
 
-  # ---------------------------------------------------------------------------
-  # Dependency & filesystem CVE scan
-  # ---------------------------------------------------------------------------
+
   trivy-fs:
-    name: Trivy – FS & Dependency Scan
+    name: Trivy FS & Dependency Scan
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Trivy – scan filesystem (deps + secrets)
+      - name: Trivy scan filesystem (deps + secrets)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
@@ -156,16 +151,13 @@ jobs:
         with:
           sarif_file: trivy-fs.sarif
 
-  # ---------------------------------------------------------------------------
-  # Secret scanning across full git history
-  # ---------------------------------------------------------------------------
   trufflehog:
-    name: TruffleHog – Secret Scan
+    name: TruffleHog Secret Scan
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
