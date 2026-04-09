@@ -1,5 +1,3 @@
-"""Tests for tcc_etl.loader -- to_s3, validate_and_upload, validation utils."""
-
 from __future__ import annotations
 
 import io

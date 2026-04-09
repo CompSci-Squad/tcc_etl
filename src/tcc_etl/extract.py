@@ -1,60 +1,43 @@
-"""Extract layer -- download the FRED-MD monthly dataset via async HTTP streaming.
-
-Public API:
-- fetch_fred_md() -> tuple[pl.LazyFrame, dict[str, int], list[str]]
-
-The response is consumed line-by-line with httpx streaming so the header and
-tcode rows are parsed as soon as they arrive.  Data rows are accumulated in a
-list (unavoidable -- columnar stats such as median/IQR and ADF require the full
-time series before any transformation can run).
-"""
-
 from __future__ import annotations
 
+from datetime import date
 from io import StringIO
 
 import httpx
 import polars as pl
 
-# -- Constants -----------------------------------------------------------------
-
-FRED_MD_URL: str = (
-    "https://files.stlouisfed.org/files/htdocs/fred-md/monthly/current.csv"
+_FRED_MD_BASE: str = (
+    "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly"
 )
 _START_DATE: pl.Date = pl.date(1990, 1, 1)
 
 
-# -- Public API ----------------------------------------------------------------
+def _fred_md_url(ref: date | None = None) -> str:
+    today = ref or date.today()
+    if today.month == 1:
+        year, month = today.year - 1, 12
+    else:
+        year, month = today.year, today.month - 1
+    return f"{_FRED_MD_BASE}/{year}-{month:02d}-md.csv"
+
 
 
 async def fetch_fred_md() -> tuple[pl.LazyFrame, dict[str, int], list[str]]:
-    """Stream the current FRED-MD CSV and return a LazyFrame plus metadata.
-
-    Streaming protocol:
-    - Line 0 (header) and Line 1 (tcode) are parsed the moment each arrives.
-    - Data lines (Line 2+) are collected into a list so that the full time
-      series is available for the downstream columnar transforms.
-    - An HTTP error status raises httpx.HTTPStatusError before any data is
-      consumed.
-    """
     header_line: str | None = None
     tcode_line: str | None = None
     data_lines: list[str] = []
 
     async with httpx.AsyncClient() as client:
-        async with client.stream("GET", FRED_MD_URL, timeout=60.0) as response:
+        async with client.stream("GET", _fred_md_url(), timeout=60.0) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line:
                     continue
                 if header_line is None:
-                    # Line 0: sasdate,SERIES1,SERIES2,...
                     header_line = line
                 elif tcode_line is None:
-                    # Line 1: tcode,1,5,2,...  -- parsed immediately
                     tcode_line = line
                 else:
-                    # Lines 2+: monthly observations
                     data_lines.append(line)
 
     if header_line is None or tcode_line is None:
@@ -68,7 +51,6 @@ async def fetch_fred_md() -> tuple[pl.LazyFrame, dict[str, int], list[str]]:
         if tc.strip() not in ("", "tcode")
     }
 
-    # Rebuild a clean CSV (header + data only, no tcode row)
     data_text = "\n".join([header_line] + data_lines)
 
     lf = (

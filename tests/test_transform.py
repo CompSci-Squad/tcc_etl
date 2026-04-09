@@ -1,5 +1,3 @@
-"""Tests for tcc_etl.transform -- remove_outliers, apply_tcode, transform_all."""
-
 from __future__ import annotations
 
 import math
@@ -9,11 +7,6 @@ import polars as pl
 import pytest
 
 from tcc_etl.transform import apply_tcode, remove_outliers, transform_all
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _series(values: list, name: str = "x") -> pl.Series:
@@ -26,10 +19,6 @@ def _dates(n: int) -> list[date]:
     start = date(1990, 1, 1)
     return [start + timedelta(days=31 * i) for i in range(n)]
 
-
-# ---------------------------------------------------------------------------
-# remove_outliers
-# ---------------------------------------------------------------------------
 
 
 class TestRemoveOutliers:
@@ -56,18 +45,12 @@ class TestRemoveOutliers:
         assert result["date"].null_count() == 0
 
     def test_custom_k_tighter_bound(self) -> None:
-        """A smaller k flags more values as outliers."""
         lf = pl.DataFrame(
             {"date": _dates(6), "x": [1.0, 2.0, 3.0, 2.0, 1.0, 10.0]}
         ).lazy()
-        # k=1 should flag the 10.0 value given the IQR of [1,1,2,2,3]
         result = remove_outliers(lf, ["x"], k=1.0).collect()
         assert result["x"][-1] is None
 
-
-# ---------------------------------------------------------------------------
-# apply_tcode
-# ---------------------------------------------------------------------------
 
 
 class TestApplyTcode:
@@ -87,11 +70,10 @@ class TestApplyTcode:
     def test_tcode_3_second_diff(self) -> None:
         s = _series([1.0, 2.0, 4.0, 7.0])
         result = apply_tcode(s, 3)
-        # first two entries are NaN
         assert result[0] is None or math.isnan(result[0])
         assert result[1] is None or math.isnan(result[1])
-        assert result[2] == pytest.approx(1.0)  # (4-2) - (2-1) = 1
-        assert result[3] == pytest.approx(1.0)  # (7-4) - (4-2) = 1
+        assert result[2] == pytest.approx(1.0)
+        assert result[3] == pytest.approx(1.0)
 
     def test_tcode_4_log(self) -> None:
         s = _series([1.0, math.e, -1.0])
@@ -120,7 +102,6 @@ class TestApplyTcode:
         result = apply_tcode(s, 7)
         assert result[0] is None or math.isnan(result[0])
         assert result[1] is None or math.isnan(result[1])
-        # pct[1]=0.1, pct[2]=0.1, diff[2]=0.0
         assert result[2] == pytest.approx(0.0, abs=1e-6)
 
     def test_unknown_tcode_raises_value_error(self) -> None:
@@ -163,7 +144,7 @@ class TestTransformAll:
     def test_drops_first_two_rows(self, sample_tcodes: dict[str, int]) -> None:
         lf = self._make_lf()
         result = transform_all(lf, sample_tcodes, ["SERIES1", "SERIES2", "SERIES3"]).collect()
-        assert len(result) == 3  # 5 rows - 2 = 3
+        assert len(result) == 3
 
     def test_returns_lazyframe(self, sample_tcodes: dict[str, int]) -> None:
         lf = self._make_lf()
@@ -176,7 +157,6 @@ class TestTransformAll:
         assert "date" in result.columns
 
     def test_series_not_in_tcodes_skipped(self) -> None:
-        """Series not in tcodes dict are left unchanged."""
         lf = pl.DataFrame(
             {"date": _dates(4), "EXTRA": [1.0, 2.0, 3.0, 4.0]}
         ).lazy()

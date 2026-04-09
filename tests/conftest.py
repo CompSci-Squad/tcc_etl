@@ -1,5 +1,3 @@
-"""Shared pytest fixtures for the FRED-MD ETL test suite."""
-
 from __future__ import annotations
 
 import os

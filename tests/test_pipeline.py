@@ -1,9 +1,3 @@
-"""Integration tests for the FRED-MD ETL pipeline.
-
-Tests target _handler (the async coroutine) directly to avoid nesting
-asyncio.run() inside pytest-asyncio's own event loop.
-"""
-
 from __future__ import annotations
 
 import importlib

@@ -1,22 +1,3 @@
-"""AWS Lambda entrypoint for the FRED-MD monthly ETL pipeline.
-
-EventBridge Scheduler trigger: cron(0 22 20 * ? *) UTC  (20th of each month)
-Architecture: ARM64 (Graviton), Docker container on AWS Lambda
-
-The internal _handler coroutine is fully async:
-- fetch_fred_md() streams the HTTP response line-by-line (httpx)
-- Three S3 uploads run concurrently via asyncio.gather (no sequential blocking)
-
-The public handler() wrapper calls asyncio.run() so the Lambda runtime sees a
-standard synchronous function.
-
-S3 output layout:
-    s3://<BUCKET>/fred_md/
-    |-- raw/year=YYYY/month=MM/         fred_md_raw_YYYY_MM.parquet
-    |-- transformed/year=YYYY/month=MM/ fred_md_transformed_YYYY_MM.parquet
-    +-- metadata/year=YYYY/month=MM/    fred_md_validation_YYYY_MM.parquet
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +12,6 @@ BUCKET: str = os.environ["S3_BUCKET"]
 
 
 async def _handler(event: dict, context: object) -> dict:
-    """Async implementation of the FRED-MD ETL pipeline."""
     lf, tcodes, series_ids = await fetch_fred_md()
 
     lf_clean = remove_outliers(lf, series_ids)
@@ -48,7 +28,6 @@ async def _handler(event: dict, context: object) -> dict:
     tag = f"{yr}_{mo}"
     pfx = f"year={yr}/month={mo}"
 
-    # Upload all three Parquet files concurrently
     await asyncio.gather(
         validate_and_upload(
             df_raw,
@@ -79,5 +58,4 @@ async def _handler(event: dict, context: object) -> dict:
 
 
 def handler(event: dict, context: object) -> dict:
-    """AWS Lambda entrypoint -- synchronous wrapper around the async pipeline."""
     return asyncio.run(_handler(event, context))

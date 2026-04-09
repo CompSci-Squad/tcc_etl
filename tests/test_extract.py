@@ -1,5 +1,3 @@
-"""Tests for tcc_etl.extract -- async fetch_fred_md."""
-
 from __future__ import annotations
 
 from datetime import date
@@ -9,7 +7,7 @@ import httpx
 import polars as pl
 import pytest
 
-from tcc_etl.extract import FRED_MD_URL, fetch_fred_md
+from tcc_etl.extract import _fred_md_url, fetch_fred_md
 
 
 class TestFetchFredMd:
@@ -93,8 +91,24 @@ class TestFetchFredMd:
             with pytest.raises(httpx.HTTPStatusError):
                 await fetch_fred_md()
 
-    async def test_uses_correct_url(self, fred_md_stream_mock: AsyncMock) -> None:
+    async def test_uses_prior_month_url(self, fred_md_stream_mock: AsyncMock) -> None:
         await fetch_fred_md()
         fred_md_stream_mock.stream.assert_called_once()
-        call_args = fred_md_stream_mock.stream.call_args
-        assert call_args[0][1] == FRED_MD_URL
+        url = fred_md_stream_mock.stream.call_args[0][1]
+        assert url == _fred_md_url()
+        assert url.endswith("-md.csv")
+
+
+class TestFredMdUrl:
+    def test_april_returns_march(self) -> None:
+        assert _fred_md_url(date(2026, 4, 9)).endswith("2026-03-md.csv")
+
+    def test_january_returns_december_prior_year(self) -> None:
+        assert _fred_md_url(date(2026, 1, 15)).endswith("2025-12-md.csv")
+
+    def test_december_returns_november(self) -> None:
+        assert _fred_md_url(date(2025, 12, 1)).endswith("2025-11-md.csv")
+
+    def test_url_contains_base_path(self) -> None:
+        url = _fred_md_url(date(2026, 4, 1))
+        assert "fred-md/monthly" in url

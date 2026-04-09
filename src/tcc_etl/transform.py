@@ -1,20 +1,3 @@
-"""Transform layer -- outlier removal and tcode-based transformations.
-
-Public API:
-- remove_outliers(lf, series_ids, k)   -> pl.LazyFrame
-- apply_tcode(series, tcode)           -> pl.Series
-- transform_all(lf, tcodes, series_ids) -> pl.LazyFrame
-
-Transformation codes (McCracken & Ng 2016):
-    1  level (identity)
-    2  first difference
-    3  second difference
-    4  log
-    5  log first difference
-    6  log second difference
-    7  first difference of percent change
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -26,11 +9,9 @@ try:
 
     _jax_config.update("jax_enable_x64", True)
     _JAX_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _JAX_AVAILABLE = False
 
-
-# -- Public API ----------------------------------------------------------------
 
 
 def remove_outliers(
@@ -38,12 +19,6 @@ def remove_outliers(
     series_ids: list[str],
     k: float = 10.0,
 ) -> pl.LazyFrame:
-    """Replace outliers with null using the McCracken-Ng (2016) rule.
-
-    A value is an outlier when |x - median| > k * IQR, computed over the
-    full history of each series.  All series are processed in a single
-    `.with_columns` call for maximum LazyFrame efficiency.
-    """
     exprs = [
         pl.when(
             (pl.col(c) >= pl.col(c).median() - k * (pl.col(c).quantile(0.75) - pl.col(c).quantile(0.25)))
@@ -58,16 +33,11 @@ def remove_outliers(
 
 
 def apply_tcode(series: pl.Series, tcode: int) -> pl.Series:
-    """Apply a FRED-MD transformation code to a Polars Series via JAX.
-
-    Uses JAX (jax.numpy) as the numerical backend.  Falls back to NumPy
-    transparently when JAX is unavailable (test environments without GPU/XLA).
-    """
     arr_np = series.to_numpy(allow_copy=True).astype(float)
 
     if _JAX_AVAILABLE:
         result = _apply_tcode_jax(arr_np, tcode, series.name)
-    else:  # pragma: no cover
+    else:  
         result = _apply_tcode_numpy(arr_np, tcode, series.name)
 
     return pl.Series(name=series.name, values=np.asarray(result), dtype=pl.Float64)
@@ -78,11 +48,6 @@ def transform_all(
     tcodes: dict[str, int],
     series_ids: list[str],
 ) -> pl.LazyFrame:
-    """Apply per-series tcode transformations and discard the first 2 rows.
-
-    The LazyFrame is collected once here because JAX operates on in-memory
-    arrays.  The result is returned as a LazyFrame for consistent API usage.
-    """
     df = lf.collect()
 
     transformed_cols = [
@@ -94,15 +59,11 @@ def transform_all(
     if transformed_cols:
         df = df.with_columns(transformed_cols)
 
-    # Discard rows 0 and 1 -- they carry NaNs introduced by double-differencing
     return df.slice(2).lazy()
 
 
-# -- JAX kernel ----------------------------------------------------------------
 
-
-def _apply_tcode_jax(arr_np: np.ndarray, tcode: int, name: str) -> np.ndarray:  # type: ignore[return]
-    """Map tcode -> JAX transformation, return a plain ndarray."""
+def _apply_tcode_jax(arr_np: np.ndarray, tcode: int, name: str) -> np.ndarray:
     nan = jnp.nan
     arr = jnp.array(arr_np)
 
@@ -131,11 +92,8 @@ def _apply_tcode_jax(arr_np: np.ndarray, tcode: int, name: str) -> np.ndarray:  
         raise ValueError(f"tcode desconhecido: {tcode} (serie: {name})")
 
 
-# -- NumPy fallback (no JAX) ---------------------------------------------------
 
-
-def _apply_tcode_numpy(arr: np.ndarray, tcode: int, name: str) -> np.ndarray:  # type: ignore[return]
-    """Identical logic to _apply_tcode_jax using plain NumPy."""
+def _apply_tcode_numpy(arr: np.ndarray, tcode: int, name: str) -> np.ndarray:
     nan = np.nan
 
     if tcode == 1:
