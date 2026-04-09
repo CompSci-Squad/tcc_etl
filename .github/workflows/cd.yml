@@ -90,13 +90,6 @@ jobs:
           format: spdx-json
           upload-release-assets: true
 
-      # ── ECR push (Lambda deployment) — version tags only ─────────────────────
-      # Requires AWS one-time setup: OIDC identity provider + IAM role.
-      # GitHub repo secrets/vars needed:
-      #   Secret  AWS_OIDC_ROLE_ARN  – IAM role ARN (trust: refs/tags/*)
-      #   Secret  AWS_ACCOUNT_ID     – 12-digit AWS account ID
-      #   Var     AWS_REGION         – e.g. sa-east-1
-      #   Var     ECR_REPOSITORY     – e.g. tcc-etl
       - name: Configure AWS credentials (OIDC)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: aws-actions/configure-aws-credentials@v4
@@ -118,49 +111,3 @@ jobs:
           push: true
           tags: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:${{ github.ref_name }}
           cache-from: type=gha
-
-  build-pypy-arm64:
-    name: Build PyPy image (arm64)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata (PyPy)
-        id: meta-pypy
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-pypy
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-
-      - name: Build and push PyPy ARM64 image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.pypy
-          platforms: linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta-pypy.outputs.tags }}
-          labels: ${{ steps.meta-pypy.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
