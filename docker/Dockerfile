@@ -1,4 +1,4 @@
-FROM public.ecr.aws/lambda/python:3.12-arm64
+FROM public.ecr.aws/lambda/python:3.14-arm64
 
 RUN pip install --no-cache-dir \
     polars \
