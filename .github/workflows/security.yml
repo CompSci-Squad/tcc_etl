@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  # ── Secret scanning ──────────────────────────────────────────────────────────
+
   secret-scan:
     name: Secret Scanning (TruffleHog)
     runs-on: ubuntu-latest
@@ -24,9 +24,6 @@ jobs:
         with:
           extra_args: --results=verified,unknown
 
-  # ── Dependency CVE audit ─────────────────────────────────────────────────────
-  # pip-audit reads uv.lock directly — no project install needed.
-  # Complements dependency-review.yml, which only runs on PRs.
   dependency-audit:
     name: Dependency Audit (pip-audit)
     runs-on: ubuntu-latest
@@ -36,10 +33,6 @@ jobs:
       - name: pip-audit
         run: uvx pip-audit
 
-  # ── Container & filesystem scan ───────────────────────────────────────────────
-  # Scans Dockerfile, pyproject.toml, and IaC misconfigs BEFORE the build.
-  # Complements the post-build image scan already in cd.yml.
-  # Add CVE IDs to .trivyignore at repo root to suppress unfixable findings.
   container-scan:
     name: Filesystem & IaC Scan (Trivy)
     runs-on: ubuntu-latest
@@ -56,12 +49,9 @@ jobs:
           ignore-unfixed: true
           scanners: vuln,misconfig,secret
 
-  # ── Supply-chain health ───────────────────────────────────────────────────────
   scorecard:
     name: OpenSSF Scorecard
     runs-on: ubuntu-latest
-    # Skipped on PR because the publish step needs id-token:write, which
-    # is not available in PRs from forks.
     if: github.event_name == 'push' || github.event_name == 'schedule'
     permissions:
       security-events: write
