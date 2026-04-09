@@ -1,116 +1,88 @@
-"""Extract layer — fetch macroeconomic data from FRED and Yahoo Finance.
+"""Extract layer -- download the FRED-MD monthly dataset via async HTTP streaming.
 
-Two public functions:
-- fetch_fred(start, end) -> dict[str, pl.DataFrame]
-- fetch_yahoo(start, end) -> dict[str, pl.DataFrame]
+Public API:
+- fetch_fred_md() -> tuple[pl.LazyFrame, dict[str, int], list[str]]
+
+The response is consumed line-by-line with httpx streaming so the header and
+tcode rows are parsed as soon as they arrive.  Data rows are accumulated in a
+list (unavoidable -- columnar stats such as median/IQR and ADF require the full
+time series before any transformation can run).
 """
 
 from __future__ import annotations
 
-import os
+from io import StringIO
 
+import httpx
 import polars as pl
-import yfinance as yf
-from fredapi import Fred
 
-# ── Constants ──────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 
-FRED_SERIES: list[str] = [
-    "VIXCLS",
-    "DGS10",
-    "DTB3",
-    "BAMLH0A0HYM2",
-    "DCOILBRENTEU",
-    "CPIAUCSL",
-    "FEDFUNDS",
-    "INDPRO",
-    "UNRATE",
-]
-
-YAHOO_TICKERS: list[str] = ["^GSPC", "GC=F", "DX-Y.NYB"]
+FRED_MD_URL: str = (
+    "https://files.stlouisfed.org/files/htdocs/fred-md/monthly/current.csv"
+)
+_START_DATE: pl.Date = pl.date(1990, 1, 1)
 
 
-# ── Public API ─────────────────────────────────────────────────────────────
+# -- Public API ----------------------------------------------------------------
 
 
-def fetch_fred(start: str, end: str) -> dict[str, pl.DataFrame]:
-    """Fetch FRED series for the given date range.
+async def fetch_fred_md() -> tuple[pl.LazyFrame, dict[str, int], list[str]]:
+    """Stream the current FRED-MD CSV and return a LazyFrame plus metadata.
 
-    Parameters
-    ----------
-    start:
-        ISO date string, e.g. ``"2026-03-24"``.
-    end:
-        ISO date string, e.g. ``"2026-03-31"``.
-
-    Returns
-    -------
-    dict[str, pl.DataFrame]
-        Keys are FRED series IDs. Each DataFrame has columns
-        ``["date", <series_id>]`` with dtypes ``[pl.Date, pl.Float64]``.
-
-    Raises
-    ------
-    KeyError
-        If ``FRED_API_KEY`` is not set in the environment.
+    Streaming protocol:
+    - Line 0 (header) and Line 1 (tcode) are parsed the moment each arrives.
+    - Data lines (Line 2+) are collected into a list so that the full time
+      series is available for the downstream columnar transforms.
+    - An HTTP error status raises httpx.HTTPStatusError before any data is
+      consumed.
     """
-    fred = Fred(api_key=os.environ["FRED_API_KEY"])
-    result: dict[str, pl.DataFrame] = {}
+    header_line: str | None = None
+    tcode_line: str | None = None
+    data_lines: list[str] = []
 
-    for series_id in FRED_SERIES:
-        raw = fred.get_series(series_id, observation_start=start, observation_end=end)
-        # Build DataFrame from the Series directly — avoids integer column name
-        # produced by reset_index() which Polars cannot rename via string keys.
-        df = pl.DataFrame({
-            "date": raw.index.to_list(),
-            series_id: raw.values.tolist(),
-        }).with_columns(
-            pl.col("date").cast(pl.Date),
-            pl.col(series_id).cast(pl.Float64),
+    async with httpx.AsyncClient() as client:
+        async with client.stream("GET", FRED_MD_URL, timeout=60.0) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if header_line is None:
+                    # Line 0: sasdate,SERIES1,SERIES2,...
+                    header_line = line
+                elif tcode_line is None:
+                    # Line 1: tcode,1,5,2,...  -- parsed immediately
+                    tcode_line = line
+                else:
+                    # Lines 2+: monthly observations
+                    data_lines.append(line)
+
+    if header_line is None or tcode_line is None:
+        raise ValueError("FRED-MD response contained no data")
+
+    series_ids: list[str] = header_line.split(",")[1:]
+
+    tcodes: dict[str, int] = {
+        sid: int(float(tc))
+        for sid, tc in zip(series_ids, tcode_line.split(",")[1:])
+        if tc.strip() not in ("", "tcode")
+    }
+
+    # Rebuild a clean CSV (header + data only, no tcode row)
+    data_text = "\n".join([header_line] + data_lines)
+
+    lf = (
+        pl.read_csv(
+            StringIO(data_text),
+            null_values=["", "NaN", "."],
+            try_parse_dates=False,
         )
-        result[series_id] = df
-
-    return result
-
-
-def fetch_yahoo(start: str, end: str) -> dict[str, pl.DataFrame]:
-    """Fetch closing prices for equity/commodity tickers from Yahoo Finance.
-
-    Parameters
-    ----------
-    start:
-        ISO date string, e.g. ``"2026-03-24"``.
-    end:
-        ISO date string, e.g. ``"2026-03-31"``.
-
-    Returns
-    -------
-    dict[str, pl.DataFrame]
-        Keys are ticker strings. Each DataFrame has columns
-        ``["date", <ticker>]`` with dtypes ``[pl.Date, pl.Float64]``.
-    """
-    raw = yf.download(
-        YAHOO_TICKERS,
-        start=start,
-        end=end,
-        auto_adjust=True,
-        progress=False,
+        .lazy()
+        .with_columns(
+            pl.col("sasdate").str.strptime(pl.Date, "%m/%d/%Y").alias("date")
+        )
+        .drop("sasdate")
+        .filter(pl.col("date") >= _START_DATE)
     )
 
-    # Strip timezone from DatetimeIndex
-    raw.index = raw.index.tz_localize(None)
-
-    close = raw["Close"]
-    result: dict[str, pl.DataFrame] = {}
-
-    for ticker in YAHOO_TICKERS:
-        ticker_col = close[ticker]
-        df = pl.DataFrame(
-            {"date": ticker_col.index.to_list(), ticker: ticker_col.values.tolist()}
-        ).with_columns(
-            pl.col("date").cast(pl.Date),
-            pl.col(ticker).cast(pl.Float64),
-        )
-        result[ticker] = df
-
-    return result
+    return lf, tcodes, series_ids

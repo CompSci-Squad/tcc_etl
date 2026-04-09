@@ -8,10 +8,7 @@ services:
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-tcc-etl-bucket}
-      - FRED_API_KEY=${FRED_API_KEY:-}
-      - PANEL_RAW_KEY=${PANEL_RAW_KEY:-panel_raw.parquet}
-      - PANEL_TRANSFORMED_KEY=${PANEL_TRANSFORMED_KEY:-panel_transformed.parquet}
+      - S3_BUCKET=${S3_BUCKET:-tcc-etl-bucket}
       # Point to LocalStack when running locally
       - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localstack:4566}
     depends_on:

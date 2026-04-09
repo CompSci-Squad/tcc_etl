@@ -1,94 +1,116 @@
-"""Tests for tcc_etl.main.handler — Lambda entrypoint."""
+"""Integration tests for the FRED-MD ETL pipeline.
+
+Tests target _handler (the async coroutine) directly to avoid nesting
+asyncio.run() inside pytest-asyncio's own event loop.
+"""
 
 from __future__ import annotations
 
-import os
-from datetime import date
-from unittest.mock import MagicMock, patch
+import importlib
+from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import polars as pl
+import boto3
 import pytest
+from moto import mock_aws
+
+_SAMPLE_CSV = (
+    "sasdate,SERIES1,SERIES2,SERIES3\n"
+    "tcode,1,5,2\n"
+    "1/1/1990,100.0,200.0,50.0\n"
+    "2/1/1990,101.0,202.0,51.0\n"
+    "3/1/1990,102.0,205.0,52.0\n"
+    "4/1/1990,103.0,207.0,53.0\n"
+    "5/1/1990,104.0,210.0,54.0"
+)
 
 
-@pytest.fixture()
-def _env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setenv("FRED_API_KEY", "test-key")
-    monkeypatch.setenv("PANEL_RAW_KEY", "panel_raw.parquet")
-    monkeypatch.setenv("PANEL_TRANSFORMED_KEY", "panel_transformed.parquet")
+class _FakeStreamResponse:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    async def __aenter__(self) -> "_FakeStreamResponse":
+        return self
+
+    async def __aexit__(self, *a: object) -> None:
+        pass
+
+    async def aiter_lines(self) -> AsyncGenerator[str, None]:
+        for line in self._lines:
+            yield line
+
+    def raise_for_status(self) -> None:
+        pass
 
 
-def _make_dummy_df() -> pl.DataFrame:
-    return pl.DataFrame({"date": [date(2026, 3, 25)]}).with_columns(
-        pl.col("date").cast(pl.Date)
-    )
+def _make_httpx_mock(csv_text: str) -> MagicMock:
+    lines = csv_text.splitlines()
+    fake_stream = _FakeStreamResponse(lines)
+    mock_client = AsyncMock()
+    mock_client.stream = MagicMock(return_value=fake_stream)
+    mock_instance = AsyncMock()
+    mock_instance.__aenter__.return_value = mock_client
+    return MagicMock(return_value=mock_instance)
 
 
 class TestHandler:
-    def test_returns_required_keys(self, _env: None) -> None:
-        dummy_df = _make_dummy_df()
+    async def test_returns_status_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("S3_BUCKET", "test-bucket")
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-bucket")
 
-        with (
-            patch("tcc_etl.main.fetch_fred", return_value={}),
-            patch("tcc_etl.main.fetch_yahoo", return_value={}),
-            patch("tcc_etl.main.build_spine", return_value=dummy_df),
-            patch("tcc_etl.main.assemble", return_value=dummy_df),
-            patch("tcc_etl.main.transform_panel", return_value=dummy_df),
-            patch("tcc_etl.main.validate_and_upload", return_value=100),
-        ):
-            from tcc_etl.main import handler
-            result = handler({}, None)
+            import tcc_etl.main as main_mod
+            importlib.reload(main_mod)
+
+            with (
+                patch("tcc_etl.extract.httpx.AsyncClient", _make_httpx_mock(_SAMPLE_CSV)),
+                patch("tcc_etl.loader._s3", client),
+            ):
+                result = await main_mod._handler({}, None)
 
         assert result["statusCode"] == 200
-        assert "rows_in_panel" in result
-        assert "rows_added" in result
-        assert "panel_raw_key" in result
-        assert "panel_transformed_key" in result
 
-    def test_rows_added_equals_len_transformed(self, _env: None) -> None:
-        dummy_df = _make_dummy_df()
+    async def test_writes_three_s3_objects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("S3_BUCKET", "test-bucket")
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-bucket")
 
-        with (
-            patch("tcc_etl.main.fetch_fred", return_value={}),
-            patch("tcc_etl.main.fetch_yahoo", return_value={}),
-            patch("tcc_etl.main.build_spine", return_value=dummy_df),
-            patch("tcc_etl.main.assemble", return_value=dummy_df),
-            patch("tcc_etl.main.transform_panel", return_value=dummy_df),
-            patch("tcc_etl.main.validate_and_upload", return_value=50),
-        ):
-            from tcc_etl.main import handler
-            result = handler({}, None)
+            import tcc_etl.main as main_mod
+            importlib.reload(main_mod)
 
-        assert result["rows_added"] == len(dummy_df)
-        assert result["rows_in_panel"] == 50
+            with (
+                patch("tcc_etl.extract.httpx.AsyncClient", _make_httpx_mock(_SAMPLE_CSV)),
+                patch("tcc_etl.loader._s3", client),
+            ):
+                await main_mod._handler({}, None)
 
-    def test_extraction_error_propagates(self, _env: None) -> None:
-        """Exceptions must not be swallowed — Lambda needs them to mark failure."""
-        with patch("tcc_etl.main.fetch_fred", side_effect=RuntimeError("FRED down")):
-            from tcc_etl.main import handler
-            with pytest.raises(RuntimeError, match="FRED down"):
-                handler({}, None)
+            listed = client.list_objects(Bucket="test-bucket")
+            keys = [o["Key"] for o in listed["Contents"]]
+            assert any("raw" in k for k in keys)
+            assert any("transformed" in k for k in keys)
+            assert any("metadata" in k for k in keys)
 
-    def test_uses_default_key_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("S3_BUCKET_NAME", "test-bucket")
-        monkeypatch.setenv("FRED_API_KEY", "test-key")
-        monkeypatch.delenv("PANEL_RAW_KEY", raising=False)
-        monkeypatch.delenv("PANEL_TRANSFORMED_KEY", raising=False)
+    def test_missing_s3_bucket_raises_key_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("S3_BUCKET", raising=False)
+        import tcc_etl.main as main_mod
+        with pytest.raises(KeyError):
+            importlib.reload(main_mod)
 
-        import importlib
-        import tcc_etl.main as m
-        importlib.reload(m)  # re-evaluate module-level constants with updated env
+    async def test_response_contains_series_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("S3_BUCKET", "test-bucket")
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-bucket")
 
-        dummy_df = _make_dummy_df()
-        with (
-            patch.object(m, "fetch_fred", return_value={}),
-            patch.object(m, "fetch_yahoo", return_value={}),
-            patch.object(m, "build_spine", return_value=dummy_df),
-            patch.object(m, "assemble", return_value=dummy_df),
-            patch.object(m, "transform_panel", return_value=dummy_df),
-            patch.object(m, "validate_and_upload", return_value=10),
-        ):
-            result = m.handler({}, None)
+            import tcc_etl.main as main_mod
+            importlib.reload(main_mod)
 
-        assert result["panel_raw_key"] == "panel_raw.parquet"
-        assert result["panel_transformed_key"] == "panel_transformed.parquet"
+            with (
+                patch("tcc_etl.extract.httpx.AsyncClient", _make_httpx_mock(_SAMPLE_CSV)),
+                patch("tcc_etl.loader._s3", client),
+            ):
+                result = await main_mod._handler({}, None)
+
+        assert result["series"] == 3

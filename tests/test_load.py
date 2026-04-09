@@ -1,185 +1,195 @@
-"""Tests for tcc_etl.loader — upsert_s3, validate_and_upload, and validators."""
+"""Tests for tcc_etl.loader -- to_s3, validate_and_upload, validation utils."""
 
 from __future__ import annotations
 
 import io
-from datetime import date
-from unittest.mock import MagicMock, patch
+from datetime import date, timedelta
+from unittest.mock import patch
 
 import boto3
 import polars as pl
 import pytest
 from moto import mock_aws
+from pandera.errors import SchemaError
 
 from tcc_etl.loader import (
-    upsert_s3,
+    FredMdRawSchema,
+    FredMdTransformedSchema,
+    build_validation_df,
+    to_s3,
     validate_and_upload,
-    validate_hy_oas_gap,
-    validate_monthly_sparsity,
-    validate_no_weekends,
+    validate_series,
 )
 
-BUCKET = "test-etl-bucket"
-KEY = "panel_raw.parquet"
 
-
-def _make_s3_client():
-    return boto3.client("s3", region_name="us-east-1")
-
-
-def _make_df(dates: list[date]) -> pl.DataFrame:
-    n = len(dates)
-    return pl.DataFrame({
-        "date": dates,
-        "VIXCLS":       [15.0] * n,
-        "DGS10":        [4.0] * n,
-        "DTB3":         [5.0] * n,
-        "BAMLH0A0HYM2": [3.0] * n,
-        "DCOILBRENTEU": [80.0] * n,
-        "CPIAUCSL":     [None] * n,
-        "FEDFUNDS":     [None] * n,
-        "INDPRO":       [None] * n,
-        "UNRATE":       [None] * n,
-        "^GSPC":        [5100.0] * n,
-        "DX-Y.NYB":     [104.0] * n,
-        "GC=F":         [3000.0] * n,
-    }).with_columns(pl.col("date").cast(pl.Date))
-
-
-# ── upsert_s3 ──────────────────────────────────────────────────────────────
-
-
-class TestUpsertS3:
-    def test_first_run_creates_file(self, s3_mock) -> None:
-        bucket, client = s3_mock
-        dates = [date(2026, 3, 25), date(2026, 3, 26)]
-        df = _make_df(dates)
-
-        with patch("tcc_etl.loader._s3", client):
-            total = upsert_s3(df, KEY, bucket)
-
-        assert total == 2
-        obj = client.get_object(Bucket=bucket, Key=KEY)
-        result = pl.read_parquet(io.BytesIO(obj["Body"].read()))
-        assert len(result) == 2
-
-    def test_incremental_merge_deduplicates(self, s3_mock) -> None:
-        bucket, client = s3_mock
-
-        # First run
-        existing_dates = [date(2026, 3, 23), date(2026, 3, 24), date(2026, 3, 25)]
-        existing_df = _make_df(existing_dates)
-        with patch("tcc_etl.loader._s3", client):
-            upsert_s3(existing_df, KEY, bucket)
-
-        # Second run: overlaps on 2026-03-25, adds 2026-03-26/27
-        new_dates = [date(2026, 3, 25), date(2026, 3, 26), date(2026, 3, 27)]
-        new_df = _make_df(new_dates)
-        with patch("tcc_etl.loader._s3", client):
-            total = upsert_s3(new_df, KEY, bucket)
-
-        # Expected: 2026-03-23, 2026-03-24 (kept) + 3 new rows = 5 total
-        assert total == 5
-
-    def test_output_is_sorted_by_date(self, s3_mock) -> None:
-        bucket, client = s3_mock
-        dates = [date(2026, 3, 27), date(2026, 3, 26), date(2026, 3, 25)]
-        df = _make_df(dates)
-        with patch("tcc_etl.loader._s3", client):
-            upsert_s3(df, KEY, bucket)
-        obj = client.get_object(Bucket=bucket, Key=KEY)
-        result = pl.read_parquet(io.BytesIO(obj["Body"].read()))
-        dates_out = result["date"].to_list()
-        assert dates_out == sorted(dates_out)
-
-
-# ── Post-validation helpers ────────────────────────────────────────────────
-
-
-class TestValidateMonthlySparsity:
-    def test_passes_with_sparse_data(self) -> None:
-        # 1 non-null out of 31 rows ~ 3.2% → valid
-        n = 31
-        df = pl.DataFrame({
-            "CPIAUCSL": [1.0] + [None] * (n - 1),
-            "FEDFUNDS": [1.0] + [None] * (n - 1),
-            "INDPRO":   [1.0] + [None] * (n - 1),
-            "UNRATE":   [1.0] + [None] * (n - 1),
-        })
-        validate_monthly_sparsity(df)  # should not raise
-
-    def test_fails_when_fully_populated(self) -> None:
-        n = 31
-        df = pl.DataFrame({
-            "CPIAUCSL": [1.0] * n,
-            "FEDFUNDS": [1.0] * n,
-            "INDPRO":   [1.0] * n,
-            "UNRATE":   [1.0] * n,
-        })
-        with pytest.raises(AssertionError, match="fill rate"):
-            validate_monthly_sparsity(df)
-
-
-class TestValidateNoWeekends:
-    def test_passes_with_business_days_only(self) -> None:
-        df = pl.DataFrame({
-            "date": [date(2026, 3, 23), date(2026, 3, 24), date(2026, 3, 25)]
-        }).with_columns(pl.col("date").cast(pl.Date))
-        validate_no_weekends(df)  # should not raise
-
-    def test_fails_with_weekend_date(self) -> None:
-        df = pl.DataFrame({
-            "date": [date(2026, 3, 21), date(2026, 3, 22)]  # Saturday, Sunday
-        }).with_columns(pl.col("date").cast(pl.Date))
-        with pytest.raises(AssertionError, match="weekend"):
-            validate_no_weekends(df)
-
-
-class TestValidateHyOasGap:
-    def test_passes_with_few_nulls_post_1997(self) -> None:
-        from datetime import date, timedelta
-        d = date(1997, 1, 6)  # first Monday on/after 1997-01-01
-        bdays: list[date] = []
-        while len(bdays) < 100:
-            if d.weekday() < 5:
-                bdays.append(d)
-            d += timedelta(days=1)
-        dates = bdays
-        df = pl.DataFrame({
+def _make_valid_fred_md_df(n: int = 5) -> pl.DataFrame:
+    start = date(1990, 1, 1)
+    dates = [start + timedelta(days=31 * i) for i in range(n)]
+    return pl.DataFrame(
+        {
             "date": dates,
-            "BAMLH0A0HYM2": [3.0] * 100,
-        }).with_columns(pl.col("date").cast(pl.Date))
-        validate_hy_oas_gap(df)  # should not raise
-
-    def test_fails_with_too_many_nulls_post_1997(self) -> None:
-        from datetime import date, timedelta
-        d = date(1997, 1, 6)  # first Monday on/after 1997-01-01
-        bdays: list[date] = []
-        while len(bdays) < 300:
-            if d.weekday() < 5:
-                bdays.append(d)
-            d += timedelta(days=1)
-        dates = bdays
-        df = pl.DataFrame({
-            "date": dates,
-            "BAMLH0A0HYM2": [None] * 300,
-        }).with_columns(pl.col("date").cast(pl.Date))
-        with pytest.raises(AssertionError, match="unexpected nulls"):
-            validate_hy_oas_gap(df)
+            "SERIES1": [float(i) for i in range(n)],
+            "SERIES2": [float(i) * 2 for i in range(n)],
+        }
+    ).with_columns(pl.col("date").cast(pl.Date))
 
 
-# ── validate_and_upload ────────────────────────────────────────────────────
+class TestToS3:
+    async def test_object_created(self) -> None:
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-etl-bucket")
+            df = _make_valid_fred_md_df()
+            with patch("tcc_etl.loader._s3", client):
+                await to_s3(df, "test-etl-bucket", "test/data.parquet")
+            obj = client.get_object(Bucket="test-etl-bucket", Key="test/data.parquet")
+            assert obj["ContentLength"] > 0
+
+    async def test_content_is_valid_parquet(self) -> None:
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-etl-bucket")
+            df = _make_valid_fred_md_df()
+            with patch("tcc_etl.loader._s3", client):
+                await to_s3(df, "test-etl-bucket", "test/data.parquet")
+            body = client.get_object(Bucket="test-etl-bucket", Key="test/data.parquet")["Body"].read()
+            recovered = pl.read_parquet(io.BytesIO(body))
+            assert recovered.schema == df.schema
+
+    async def test_roundtrip_equality(self) -> None:
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-etl-bucket")
+            df = _make_valid_fred_md_df()
+            with patch("tcc_etl.loader._s3", client):
+                await to_s3(df, "test-etl-bucket", "test/roundtrip.parquet")
+            body = client.get_object(Bucket="test-etl-bucket", Key="test/roundtrip.parquet")["Body"].read()
+            recovered = pl.read_parquet(io.BytesIO(body))
+            assert df.equals(recovered)
+
+
+class TestValidateSeries:
+    def test_null_rate_correct(self) -> None:
+        s = pl.Series("X", [1.0, None, None, None, None])
+        rec = validate_series(s)
+        assert rec["null_rate"] == pytest.approx(0.8)
+
+    def test_flag_sparse_true_over_50pct(self) -> None:
+        s = pl.Series("X", [1.0] + [None] * 9)
+        rec = validate_series(s)
+        assert rec["flag_sparse"] is True
+
+    def test_flag_sparse_false_under_50pct(self) -> None:
+        s = pl.Series("X", [1.0, 2.0, 3.0, None, 5.0])
+        rec = validate_series(s)
+        assert rec["flag_sparse"] is False
+
+    def test_adf_pvalue_present_for_large_series(self) -> None:
+        import numpy as np
+        rng = np.random.default_rng(42)
+        vals = list(rng.standard_normal(50).cumsum())
+        s = pl.Series("Y", vals)
+        rec = validate_series(s)
+        assert rec["adf_pvalue"] is not None
+
+    def test_no_adf_for_small_series(self) -> None:
+        s = pl.Series("Z", [1.0, 2.0, 3.0])
+        rec = validate_series(s)
+        assert rec["adf_pvalue"] is None
+        assert rec["flag_nonstationary"] is False
+
+    def test_series_id_in_output(self) -> None:
+        s = pl.Series("MYSERIES", [1.0, 2.0, 3.0])
+        rec = validate_series(s)
+        assert rec["series_id"] == "MYSERIES"
+
+    def test_expected_keys_present(self) -> None:
+        s = pl.Series("A", [1.0, 2.0])
+        rec = validate_series(s)
+        expected = {
+            "series_id", "n_obs", "null_rate", "flag_sparse",
+            "flag_infinite", "adf_pvalue", "flag_nonstationary",
+        }
+        assert set(rec.keys()) == expected
+
+
+class TestBuildValidationDf:
+    def test_row_per_series(self, sample_raw_df: pl.DataFrame, sample_series_ids: list[str]) -> None:
+        result = build_validation_df(sample_raw_df, sample_series_ids)
+        assert len(result) == len(sample_series_ids)
+
+    def test_columns_correct(self, sample_raw_df: pl.DataFrame, sample_series_ids: list[str]) -> None:
+        result = build_validation_df(sample_raw_df, sample_series_ids)
+        expected_cols = {
+            "series_id", "n_obs", "null_rate", "flag_sparse",
+            "flag_infinite", "adf_pvalue", "flag_nonstationary",
+        }
+        assert set(result.columns) == expected_cols
+
+    def test_skips_missing_series(self, sample_raw_df: pl.DataFrame) -> None:
+        result = build_validation_df(sample_raw_df, ["SERIES1", "NONEXISTENT"])
+        assert len(result) == 1
+        assert result["series_id"][0] == "SERIES1"
+
+
+class TestFredMdRawSchema:
+    def test_passes_valid_df(self) -> None:
+        FredMdRawSchema.validate(_make_valid_fred_md_df())
+
+    def test_rejects_non_unique_date(self) -> None:
+        df = pl.DataFrame(
+            {"date": [date(1990, 1, 1), date(1990, 1, 1)], "SERIES1": [1.0, 2.0]}
+        ).with_columns(pl.col("date").cast(pl.Date))
+        with pytest.raises(SchemaError):
+            FredMdRawSchema.validate(df)
+
+    def test_rejects_null_date(self) -> None:
+        df = pl.DataFrame(
+            {"date": [None, date(1990, 2, 1)], "SERIES1": [1.0, 2.0]}
+        ).with_columns(pl.col("date").cast(pl.Date))
+        with pytest.raises(SchemaError):
+            FredMdRawSchema.validate(df)
+
+
+class TestFredMdTransformedSchema:
+    def test_passes_valid_df(self) -> None:
+        FredMdTransformedSchema.validate(_make_valid_fred_md_df())
+
+    def test_passes_df_with_nulls_in_series(self) -> None:
+        df = pl.DataFrame(
+            {"date": [date(1990, 1, 1), date(1990, 2, 1)], "SERIES1": [None, 0.01]}
+        ).with_columns(pl.col("date").cast(pl.Date))
+        FredMdTransformedSchema.validate(df)
 
 
 class TestValidateAndUpload:
-    def test_pandera_error_propagates(self, s3_mock) -> None:
-        """A DataFrame violating the schema must raise SchemaError, not upload."""
-        import pandera.errors
-        bucket, client = s3_mock
-        # VIXCLS must be >= 8.0; pass 1.0 to trigger validation error
-        bad_df = _make_df([date(2026, 3, 25)]).with_columns(
-            pl.lit(1.0).cast(pl.Float64).alias("VIXCLS")
-        )
-        with patch("tcc_etl.loader._s3", client):
-            with pytest.raises(pandera.errors.SchemaError):
-                validate_and_upload(bad_df, KEY, bucket, schema="raw")
+    async def test_uploads_to_s3_on_valid_raw(self) -> None:
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-etl-bucket")
+            df = _make_valid_fred_md_df()
+            with patch("tcc_etl.loader._s3", client):
+                await validate_and_upload(df, "test-etl-bucket", "test/raw.parquet", "raw")
+            keys = [o["Key"] for o in client.list_objects(Bucket="test-etl-bucket")["Contents"]]
+            assert "test/raw.parquet" in keys
+
+    async def test_uploads_to_s3_on_valid_transformed(self) -> None:
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-etl-bucket")
+            df = _make_valid_fred_md_df()
+            with patch("tcc_etl.loader._s3", client):
+                await validate_and_upload(df, "test-etl-bucket", "test/trf.parquet", "transformed")
+            keys = [o["Key"] for o in client.list_objects(Bucket="test-etl-bucket")["Contents"]]
+            assert "test/trf.parquet" in keys
+
+    async def test_raises_schema_error_before_upload_on_invalid(self) -> None:
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-etl-bucket")
+            df = pl.DataFrame(
+                {"date": [None, date(1990, 2, 1)], "S1": [1.0, 2.0]}
+            ).with_columns(pl.col("date").cast(pl.Date))
+            with patch("tcc_etl.loader._s3", client):
+                with pytest.raises(SchemaError):
+                    await validate_and_upload(df, "test-etl-bucket", "test/bad.parquet", "raw")

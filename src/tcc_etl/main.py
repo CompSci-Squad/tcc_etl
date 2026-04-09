@@ -1,83 +1,83 @@
-"""AWS Lambda entrypoint for the macroeconomic ETL pipeline.
+"""AWS Lambda entrypoint for the FRED-MD monthly ETL pipeline.
 
-The handler performs an incremental 7-day windowed pull from FRED and
-Yahoo Finance, assembles a business-day panel, applies locked
-transformations, validates with Pandera, and upserts two Parquet files
-(panel_raw, panel_transformed) to S3.
-
-EventBridge Scheduler trigger: cron(0 22 ? * MON-FRI *) UTC
+EventBridge Scheduler trigger: cron(0 22 20 * ? *) UTC  (20th of each month)
 Architecture: ARM64 (Graviton), Docker container on AWS Lambda
+
+The internal _handler coroutine is fully async:
+- fetch_fred_md() streams the HTTP response line-by-line (httpx)
+- Three S3 uploads run concurrently via asyncio.gather (no sequential blocking)
+
+The public handler() wrapper calls asyncio.run() so the Lambda runtime sees a
+standard synchronous function.
+
+S3 output layout:
+    s3://<BUCKET>/fred_md/
+    |-- raw/year=YYYY/month=MM/         fred_md_raw_YYYY_MM.parquet
+    |-- transformed/year=YYYY/month=MM/ fred_md_transformed_YYYY_MM.parquet
+    +-- metadata/year=YYYY/month=MM/    fred_md_validation_YYYY_MM.parquet
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
-from datetime import date, timedelta
+from datetime import datetime, timezone
 
-from dotenv import load_dotenv
+from tcc_etl.extract import fetch_fred_md
+from tcc_etl.loader import build_validation_df, to_s3, validate_and_upload
+from tcc_etl.transform import remove_outliers, transform_all
 
-from tcc_etl.extract import fetch_fred, fetch_yahoo
-from tcc_etl.loader import validate_and_upload
-from tcc_etl.transform import assemble, build_spine, transform_panel
-
-# ── Module-level config (evaluated once per cold start, reused on warm starts)
-
-load_dotenv()  # no-op in Lambda (env vars set by runtime); useful for local dev
-
-BUCKET: str = os.environ["S3_BUCKET_NAME"]
-RAW_KEY: str = os.environ.get("PANEL_RAW_KEY", "panel_raw.parquet")
-TRANSFORMED_KEY: str = os.environ.get("PANEL_TRANSFORMED_KEY", "panel_transformed.parquet")
+BUCKET: str = os.environ["S3_BUCKET"]
 
 
-# ── Lambda handler ─────────────────────────────────────────────────────────
+async def _handler(event: dict, context: object) -> dict:
+    """Async implementation of the FRED-MD ETL pipeline."""
+    lf, tcodes, series_ids = await fetch_fred_md()
 
+    lf_clean = remove_outliers(lf, series_ids)
+    df_raw = lf_clean.collect()
 
-def handler(event: dict, context: object) -> dict:  # type: ignore[type-arg]
-    """AWS Lambda entrypoint — runs the full incremental ETL pipeline.
+    lf_transformed = transform_all(lf_clean, tcodes, series_ids)
+    df_transformed = lf_transformed.collect()
 
-    Parameters
-    ----------
-    event:
-        EventBridge event payload (not used; pipeline is triggered on schedule).
-    context:
-        Lambda context object (not used directly).
+    df_validation = build_validation_df(df_transformed, series_ids)
 
-    Returns
-    -------
-    dict
-        ``{"statusCode": 200, "rows_in_panel": int, "rows_added": int,
-           "panel_raw_key": str, "panel_transformed_key": str}``
+    now = datetime.now(tz=timezone.utc)
+    yr = now.strftime("%Y")
+    mo = now.strftime("%m")
+    tag = f"{yr}_{mo}"
+    pfx = f"year={yr}/month={mo}"
 
-    Raises
-    ------
-    Exception
-        Any extraction, transformation, or validation exception propagates
-        directly so Lambda marks the invocation as failed and EventBridge
-        logs it. Do not catch exceptions here.
-    """
-    end: str = date.today().isoformat()
-    start: str = (date.today() - timedelta(days=7)).isoformat()
-
-    # 1. Extract
-    fred_data = fetch_fred(start, end)
-    yahoo_data = fetch_yahoo(start, end)
-
-    # 2. Assemble raw panel
-    spine = build_spine(start, end)
-    panel_raw = assemble(spine, fred_data, yahoo_data)
-
-    # 3. Transform
-    panel_transformed = transform_panel(panel_raw)
-
-    # 4. Validate + upsert to S3
-    raw_total = validate_and_upload(panel_raw, RAW_KEY, BUCKET, schema="raw")
-    trf_total = validate_and_upload(panel_transformed, TRANSFORMED_KEY, BUCKET, schema="transformed")
+    # Upload all three Parquet files concurrently
+    await asyncio.gather(
+        validate_and_upload(
+            df_raw,
+            BUCKET,
+            f"fred_md/raw/{pfx}/fred_md_raw_{tag}.parquet",
+            "raw",
+        ),
+        validate_and_upload(
+            df_transformed,
+            BUCKET,
+            f"fred_md/transformed/{pfx}/fred_md_transformed_{tag}.parquet",
+            "transformed",
+        ),
+        to_s3(
+            df_validation,
+            BUCKET,
+            f"fred_md/metadata/{pfx}/fred_md_validation_{tag}.parquet",
+        ),
+    )
 
     return {
         "statusCode": 200,
-        "rows_in_panel": trf_total,
-        "rows_added": len(panel_transformed),
-        "panel_raw_key": RAW_KEY,
-        "panel_transformed_key": TRANSFORMED_KEY,
+        "series": len(series_ids),
+        "rows": len(df_transformed),
+        "year": yr,
+        "month": mo,
     }
 
+
+def handler(event: dict, context: object) -> dict:
+    """AWS Lambda entrypoint -- synchronous wrapper around the async pipeline."""
+    return asyncio.run(_handler(event, context))

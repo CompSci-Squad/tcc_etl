@@ -14,10 +14,13 @@ FROM public.ecr.aws/lambda/python:3.12-arm64
 # boto3 is included in the Lambda base image but pinned here for reproducibility
 RUN pip install --no-cache-dir \
     polars \
-    yfinance \
-    "fredapi>=3.1" \
+    httpx \
+    numpy \
+    "jax[cpu]>=0.4" \
+    "jaxlib>=0.4" \
+    statsmodels \
+    "pyarrow>=15.0" \
     boto3 \
-    python-dotenv \
     "pandera[polars]>=0.20"
 
 # Copy only the package source — no tests, no config files

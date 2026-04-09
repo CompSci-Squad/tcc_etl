@@ -1,184 +1,163 @@
-"""Transform layer — spine construction, panel assembly, and transformations.
+"""Transform layer -- outlier removal and tcode-based transformations.
 
-Three public functions:
-- build_spine(start, end)    -> pl.DataFrame  (business-day date index)
-- assemble(spine, fred, yf)  -> pl.DataFrame  (panel_raw, 13 columns)
-- transform_panel(panel_raw) -> pl.DataFrame  (panel_transformed)
+Public API:
+- remove_outliers(lf, series_ids, k)   -> pl.LazyFrame
+- apply_tcode(series, tcode)           -> pl.Series
+- transform_all(lf, tcodes, series_ids) -> pl.LazyFrame
 
-Transformation rules are locked — do not modify without explicit instruction.
-See the project spec for rationale behind each decision.
+Transformation codes (McCracken & Ng 2016):
+    1  level (identity)
+    2  first difference
+    3  second difference
+    4  log
+    5  log first difference
+    6  log second difference
+    7  first difference of percent change
 """
 
 from __future__ import annotations
 
-import math
-
-from datetime import date
-
+import numpy as np
 import polars as pl
 
-# ── Column groupings (locked) ──────────────────────────────────────────────
+try:
+    import jax.numpy as jnp
+    from jax import config as _jax_config
 
-# Rule 1: log-return  →  ln(P_t / P_{t-1})
-_LOG_RETURN_COLS: list[str] = ["^GSPC", "GC=F", "DX-Y.NYB", "DCOILBRENTEU"]
-
-# Rule 2: arithmetic first-difference  →  x_t − x_{t-1}
-_ARITH_DIFF_COLS: list[str] = ["VIXCLS", "DGS10", "DTB3", "BAMLH0A0HYM2"]
-
-# Rule 3: monthly series — pointwise masking (4-step, see transform_panel)
-# FEDFUNDS and UNRATE → arith diff; CPIAUCSL and INDPRO → log-return
-# All four are re-masked to publication dates only after transformation.
-_MONTHLY_LOG_RETURN: list[str] = ["CPIAUCSL", "INDPRO"]
-_MONTHLY_ARITH_DIFF: list[str] = ["FEDFUNDS", "UNRATE"]
-_MONTHLY_COLS: list[str] = _MONTHLY_LOG_RETURN + _MONTHLY_ARITH_DIFF
-
-# Canonical column order for the output panel
-_PANEL_COLUMNS: list[str] = [
-    "date",
-    "VIXCLS",
-    "DGS10",
-    "DTB3",
-    "BAMLH0A0HYM2",
-    "DCOILBRENTEU",
-    "CPIAUCSL",
-    "FEDFUNDS",
-    "INDPRO",
-    "UNRATE",
-    "^GSPC",
-    "DX-Y.NYB",
-    "GC=F",
-]
+    _jax_config.update("jax_enable_x64", True)
+    _JAX_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _JAX_AVAILABLE = False
 
 
-# Batch size for collect_batches in transform_panel
-_BATCH_SIZE: int = 5_000
-
-# ── Public API ─────────────────────────────────────────────────────────────
+# -- Public API ----------------------------------------------------------------
 
 
-def build_spine(start: str, end: str) -> pl.DataFrame:
-    """Return a business-day (Mon–Fri) date spine for the given range.
+def remove_outliers(
+    lf: pl.LazyFrame,
+    series_ids: list[str],
+    k: float = 10.0,
+) -> pl.LazyFrame:
+    """Replace outliers with null using the McCracken-Ng (2016) rule.
 
-    Parameters
-    ----------
-    start, end:
-        ISO date strings, e.g. ``"2026-03-24"``.
-
-    Returns
-    -------
-    pl.DataFrame
-        Single column ``date`` with dtype ``pl.Date``, no weekends.
+    A value is an outlier when |x - median| > k * IQR, computed over the
+    full history of each series.  All series are processed in a single
+    `.with_columns` call for maximum LazyFrame efficiency.
     """
-    start_date = date.fromisoformat(start)
-    end_date = date.fromisoformat(end)
-    return (
-        pl.date_range(start=start_date, end=end_date, interval="1d", eager=True)
-        .to_frame("date")
-        .filter(pl.col("date").dt.weekday() <= 5)
-    )
+    exprs = [
+        pl.when(
+            (pl.col(c) >= pl.col(c).median() - k * (pl.col(c).quantile(0.75) - pl.col(c).quantile(0.25)))
+            & (pl.col(c) <= pl.col(c).median() + k * (pl.col(c).quantile(0.75) - pl.col(c).quantile(0.25)))
+        )
+        .then(pl.col(c))
+        .otherwise(None)
+        .alias(c)
+        for c in series_ids
+    ]
+    return lf.with_columns(exprs)
 
 
-def assemble(
-    spine: pl.DataFrame,
-    fred_data: dict[str, pl.DataFrame],
-    yahoo_data: dict[str, pl.DataFrame],
-) -> pl.DataFrame:
-    """Left-join all 12 series onto the business-day spine.
+def apply_tcode(series: pl.Series, tcode: int) -> pl.Series:
+    """Apply a FRED-MD transformation code to a Polars Series via JAX.
 
-    Parameters
-    ----------
-    spine:
-        Output of :func:`build_spine`.
-    fred_data:
-        Output of :func:`~tcc_etl.extract.fetch_fred`.
-    yahoo_data:
-        Output of :func:`~tcc_etl.extract.fetch_yahoo`.
-
-    Returns
-    -------
-    pl.DataFrame
-        ``panel_raw`` with 13 columns (date + 12 series) in canonical order.
-        All non-date columns are ``pl.Float64``.
+    Uses JAX (jax.numpy) as the numerical backend.  Falls back to NumPy
+    transparently when JAX is unavailable (test environments without GPU/XLA).
     """
-    all_series = {**fred_data, **yahoo_data}
-    lf = spine.lazy()
+    arr_np = series.to_numpy(allow_copy=True).astype(float)
 
-    for col in _PANEL_COLUMNS[1:]:  # skip "date"
-        if col in all_series:
-            lf = lf.join(all_series[col].lazy(), on="date", how="left")
+    if _JAX_AVAILABLE:
+        result = _apply_tcode_jax(arr_np, tcode, series.name)
+    else:  # pragma: no cover
+        result = _apply_tcode_numpy(arr_np, tcode, series.name)
 
-    return lf.select(_PANEL_COLUMNS).collect()
+    return pl.Series(name=series.name, values=np.asarray(result), dtype=pl.Float64)
 
 
-def transform_panel(panel_raw: pl.DataFrame) -> pl.DataFrame:
-    """Apply locked transformation rules to produce the model-input panel.
+def transform_all(
+    lf: pl.LazyFrame,
+    tcodes: dict[str, int],
+    series_ids: list[str],
+) -> pl.LazyFrame:
+    """Apply per-series tcode transformations and discard the first 2 rows.
 
-    Rules (must not be reordered):
-    1. Log-return for price series.
-    2. Arithmetic first-difference for rate/spread series.
-    3. Four-step pointwise masking for monthly series
-       (masks captured BEFORE forward-fill to avoid all-True masks).
-
-    Parameters
-    ----------
-    panel_raw:
-        Output of :func:`assemble`.
-
-    Returns
-    -------
-    pl.DataFrame
-        ``panel_transformed`` with the same 13 columns.
-        Monthly series will be ~96–97% null by design.
+    The LazyFrame is collected once here because JAX operates on in-memory
+    arrays.  The result is returned as a LazyFrame for consistent API usage.
     """
-    # ── Rule 3 Step 1: capture publication masks BEFORE any forward-fill ──
-    # Must use panel_raw (the untouched input). The mask records which dates
-    # had observed values.
-    pub_masks: dict[str, pl.Series] = {
-        c: panel_raw[c].is_not_null()
-        for c in _MONTHLY_COLS
-    }
+    df = lf.collect()
 
-    # Build a lazy chain for Rules 1 + 2 + Rule 3 Steps 2 + 3
-    lf = panel_raw.lazy()
+    transformed_cols = [
+        apply_tcode(df[sid], tcodes[sid]).alias(sid)
+        for sid in series_ids
+        if sid in df.columns and sid in tcodes
+    ]
 
-    # ── Rule 1: log-return ────────────────────────────────────────────────
-    lf = lf.with_columns([
-        pl.col(c).log(base=math.e).diff().alias(c)
-        for c in _LOG_RETURN_COLS
-    ])
+    if transformed_cols:
+        df = df.with_columns(transformed_cols)
 
-    # ── Rule 2: arithmetic first-difference ───────────────────────────────
-    lf = lf.with_columns([
-        pl.col(c).diff().alias(c)
-        for c in _ARITH_DIFF_COLS
-    ])
+    # Discard rows 0 and 1 -- they carry NaNs introduced by double-differencing
+    return df.slice(2).lazy()
 
-    # ── Rule 3 Step 2: forward-fill monthly series ────────────────────────
-    lf = lf.with_columns([
-        pl.col(c).forward_fill()
-        for c in _MONTHLY_COLS
-    ])
 
-    # ── Rule 3 Step 3: apply transformations ─────────────────────────────
-    lf = lf.with_columns([
-        pl.col(c).log(base=math.e).diff().alias(c)
-        for c in _MONTHLY_LOG_RETURN
-    ])
-    lf = lf.with_columns([
-        pl.col(c).diff().alias(c)
-        for c in _MONTHLY_ARITH_DIFF
-    ])
+# -- JAX kernel ----------------------------------------------------------------
 
-    # Collect via batches
-    chunks = list(lf.collect_batches(chunk_size=_BATCH_SIZE))
-    panel = pl.concat(chunks) if chunks else lf.collect()
 
-    # ── Rule 3 Step 4: re-mask to publication dates only ─────────────────
-    # After this step, monthly columns will be ~96–97% null. This is correct.
-    # Do NOT forward-fill after this point — the model handles sparse inputs.
-    panel = panel.with_columns([
-        pl.when(pub_masks[c]).then(pl.col(c)).otherwise(None).alias(c)
-        for c in _MONTHLY_COLS
-    ])
+def _apply_tcode_jax(arr_np: np.ndarray, tcode: int, name: str) -> np.ndarray:  # type: ignore[return]
+    """Map tcode -> JAX transformation, return a plain ndarray."""
+    nan = jnp.nan
+    arr = jnp.array(arr_np)
 
-    return panel.select(_PANEL_COLUMNS)
+    if tcode == 1:
+        return np.asarray(arr)
+    elif tcode == 2:
+        return np.asarray(jnp.concatenate([jnp.array([nan]), jnp.diff(arr)]))
+    elif tcode == 3:
+        d1 = jnp.concatenate([jnp.array([nan]), jnp.diff(arr)])
+        return np.asarray(jnp.concatenate([jnp.array([nan]), jnp.diff(d1)]))
+    elif tcode == 4:
+        return np.asarray(jnp.where(arr > 0, jnp.log(arr), nan))
+    elif tcode == 5:
+        lg = jnp.where(arr > 0, jnp.log(arr), nan)
+        return np.asarray(jnp.concatenate([jnp.array([nan]), jnp.diff(lg)]))
+    elif tcode == 6:
+        lg = jnp.where(arr > 0, jnp.log(arr), nan)
+        d1 = jnp.concatenate([jnp.array([nan]), jnp.diff(lg)])
+        return np.asarray(jnp.concatenate([jnp.array([nan]), jnp.diff(d1)]))
+    elif tcode == 7:
+        rolled = jnp.roll(arr, 1)
+        pct = jnp.where(rolled != 0, arr / rolled - 1.0, nan)
+        pct = pct.at[0].set(nan)
+        return np.asarray(jnp.concatenate([jnp.array([nan]), jnp.diff(pct)]))
+    else:
+        raise ValueError(f"tcode desconhecido: {tcode} (serie: {name})")
+
+
+# -- NumPy fallback (no JAX) ---------------------------------------------------
+
+
+def _apply_tcode_numpy(arr: np.ndarray, tcode: int, name: str) -> np.ndarray:  # type: ignore[return]
+    """Identical logic to _apply_tcode_jax using plain NumPy."""
+    nan = np.nan
+
+    if tcode == 1:
+        return arr
+    elif tcode == 2:
+        return np.concatenate([[nan], np.diff(arr)])
+    elif tcode == 3:
+        d1 = np.concatenate([[nan], np.diff(arr)])
+        return np.concatenate([[nan], np.diff(d1)])
+    elif tcode == 4:
+        return np.where(arr > 0, np.log(arr), nan)
+    elif tcode == 5:
+        lg = np.where(arr > 0, np.log(arr), nan)
+        return np.concatenate([[nan], np.diff(lg)])
+    elif tcode == 6:
+        lg = np.where(arr > 0, np.log(arr), nan)
+        d1 = np.concatenate([[nan], np.diff(lg)])
+        return np.concatenate([[nan], np.diff(d1)])
+    elif tcode == 7:
+        rolled = np.roll(arr, 1)
+        pct = np.where(rolled != 0, arr / rolled - 1.0, nan)
+        pct[0] = nan
+        return np.concatenate([[nan], np.diff(pct)])
+    else:
+        raise ValueError(f"tcode desconhecido: {tcode} (serie: {name})")

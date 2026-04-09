@@ -1,10 +1,10 @@
-"""Shared pytest fixtures for the macroeconomic ETL test suite."""
+"""Shared pytest fixtures for the FRED-MD ETL test suite."""
 
 from __future__ import annotations
 
 import os
-from collections.abc import Generator
-from datetime import date
+from collections.abc import AsyncGenerator, Generator
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import boto3
 import polars as pl
@@ -12,11 +12,8 @@ import pytest
 from moto import mock_aws
 
 
-# ── AWS credential stubs (prevent accidental real calls) ───────────────────
-
 @pytest.fixture(autouse=True)
 def _aws_credentials() -> Generator[None, None, None]:
-    """Inject fake AWS credentials for every test."""
     os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
     os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
     os.environ.setdefault("AWS_SECURITY_TOKEN", "testing")
@@ -25,11 +22,8 @@ def _aws_credentials() -> Generator[None, None, None]:
     yield
 
 
-# ── S3 mock ────────────────────────────────────────────────────────────────
-
 @pytest.fixture()
-def s3_mock() -> Generator[tuple[str, boto3.client], None, None]:  # type: ignore[type-arg]
-    """Start moto S3 mock, create a test bucket, yield (bucket_name, client)."""
+def s3_mock() -> Generator[tuple[str, boto3.client], None, None]:
     bucket_name = "test-etl-bucket"
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
@@ -37,65 +31,81 @@ def s3_mock() -> Generator[tuple[str, boto3.client], None, None]:  # type: ignor
         yield bucket_name, client
 
 
-# ── Business-day date helpers ──────────────────────────────────────────────
+_SAMPLE_CSV = (
+    "sasdate,SERIES1,SERIES2,SERIES3\n"
+    "tcode,1,5,2\n"
+    "1/1/1990,100.0,200.0,50.0\n"
+    "2/1/1990,101.0,202.0,51.0\n"
+    "3/1/1990,102.0,205.0,52.0\n"
+    "4/1/1990,103.0,207.0,53.0\n"
+    "5/1/1990,104.0,210.0,54.0"
+)
 
-# 5 consecutive business days (Mon 2026-03-23 → Fri 2026-03-27)
-_BDAYS = [
-    date(2026, 3, 23),
-    date(2026, 3, 24),
-    date(2026, 3, 25),
-    date(2026, 3, 26),
-    date(2026, 3, 27),
-]
+
+@pytest.fixture()
+def sample_csv_text() -> str:
+    return _SAMPLE_CSV
 
 
-# ── Sample DataFrames ──────────────────────────────────────────────────────
+@pytest.fixture()
+def sample_tcodes() -> dict[str, int]:
+    return {"SERIES1": 1, "SERIES2": 5, "SERIES3": 2}
+
+
+@pytest.fixture()
+def sample_series_ids() -> list[str]:
+    return ["SERIES1", "SERIES2", "SERIES3"]
+
 
 @pytest.fixture()
 def sample_raw_df() -> pl.DataFrame:
-    """5-row panel_raw DataFrame with values inside PanelRawSchema bounds."""
-    return pl.DataFrame({
-        "date": _BDAYS,
-        "VIXCLS":       [15.0, 16.0, 14.5, 17.0, 18.0],
-        "DGS10":        [4.0,  4.1,  4.2,  4.0,  3.9],
-        "DTB3":         [5.0,  5.1,  5.0,  5.2,  5.1],
-        "BAMLH0A0HYM2": [3.0,  3.1,  3.2,  3.0,  2.9],
-        "DCOILBRENTEU": [80.0, 81.0, 79.0, 82.0, 83.0],
-        # Monthly series — only 1 non-null row each (raw level, not masked)
-        "CPIAUCSL":     [310.0, None, None, None, None],
-        "FEDFUNDS":     [5.33,  None, None, None, None],
-        "INDPRO":       [103.0, None, None, None, None],
-        "UNRATE":       [4.1,   None, None, None, None],
-        "^GSPC":        [5100.0, 5120.0, 5090.0, 5150.0, 5200.0],
-        "DX-Y.NYB":     [104.0,  104.2,  104.1,  104.3,  104.0],
-        "GC=F":         [3000.0, 3010.0, 2990.0, 3020.0, 3030.0],
-    }).with_columns(pl.col("date").cast(pl.Date))
+    from datetime import date
+    return pl.DataFrame(
+        {
+            "date": [
+                date(1990, 1, 1),
+                date(1990, 2, 1),
+                date(1990, 3, 1),
+                date(1990, 4, 1),
+                date(1990, 5, 1),
+            ],
+            "SERIES1": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "SERIES2": [200.0, 202.0, 205.0, 207.0, 210.0],
+            "SERIES3": [50.0, 51.0, 52.0, 53.0, 54.0],
+        }
+    ).with_columns(pl.col("date").cast(pl.Date))
+
+
+class _FakeStreamResponse:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    async def __aenter__(self) -> "_FakeStreamResponse":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        pass
+
+    async def aiter_lines(self) -> AsyncGenerator[str, None]:
+        for line in self._lines:
+            yield line
+
+    def raise_for_status(self) -> None:
+        pass
 
 
 @pytest.fixture()
-def sample_transformed_df() -> pl.DataFrame:
-    """5-row panel_transformed DataFrame with values inside transformed bounds."""
-    import math
+def fred_md_stream_mock(sample_csv_text: str) -> Generator[AsyncMock, None, None]:
+    lines = sample_csv_text.splitlines()
+    fake_stream = _FakeStreamResponse(lines)
 
-    prices_raw = [5100.0, 5120.0, 5090.0, 5150.0, 5200.0]
-    returns = [None] + [
-        math.log(prices_raw[i] / prices_raw[i - 1])
-        for i in range(1, len(prices_raw))
-    ]
+    mock_client = AsyncMock()
+    mock_client.stream = MagicMock(return_value=fake_stream)
 
-    return pl.DataFrame({
-        "date":         _BDAYS,
-        "VIXCLS":       [None, 1.0, -1.5, 2.5, 1.0],
-        "DGS10":        [None, 0.1, 0.1, -0.2, -0.1],
-        "DTB3":         [None, 0.1, -0.1, 0.2, -0.1],
-        "BAMLH0A0HYM2": [None, 0.1, 0.1, -0.2, -0.1],
-        "DCOILBRENTEU": [None, 0.01, -0.02, 0.03, 0.01],
-        "CPIAUCSL":     [None, None, None, None, None],
-        "FEDFUNDS":     [None, None, None, None, None],
-        "INDPRO":       [None, None, None, None, None],
-        "UNRATE":       [None, None, None, None, None],
-        "^GSPC":        returns,
-        "DX-Y.NYB":     [None, 0.002, -0.001, 0.002, -0.003],
-        "GC=F":         [None, 0.003, -0.007, 0.010, 0.003],
-    }).with_columns(pl.col("date").cast(pl.Date))
+    mock_instance = AsyncMock()
+    mock_instance.__aenter__.return_value = mock_client
 
+    mock_cls = MagicMock(return_value=mock_instance)
+
+    with patch("tcc_etl.extract.httpx.AsyncClient", mock_cls):
+        yield mock_client
