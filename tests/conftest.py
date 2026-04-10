@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+
+os.environ.setdefault("PANDERA_VALIDATION_DEPTH", "SCHEMA_AND_DATA")
 from collections.abc import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +19,7 @@ def _aws_credentials() -> Generator[None, None, None]:
     os.environ.setdefault("AWS_SECURITY_TOKEN", "testing")
     os.environ.setdefault("AWS_SESSION_TOKEN", "testing")
     os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+    os.environ.setdefault("PANDERA_VALIDATION_DEPTH", "SCHEMA_AND_DATA")
     yield
 
 
@@ -75,8 +78,8 @@ def sample_raw_df() -> pl.DataFrame:
 
 
 class _FakeStreamResponse:
-    def __init__(self, lines: list[str]) -> None:
-        self._lines = lines
+    def __init__(self, data: bytes) -> None:
+        self._data = data
 
     async def __aenter__(self) -> "_FakeStreamResponse":
         return self
@@ -84,9 +87,8 @@ class _FakeStreamResponse:
     async def __aexit__(self, *args: object) -> None:
         pass
 
-    async def aiter_lines(self) -> AsyncGenerator[str, None]:
-        for line in self._lines:
-            yield line
+    async def aiter_bytes(self, chunk_size: int = 65_536) -> AsyncGenerator[bytes, None]:
+        yield self._data
 
     def raise_for_status(self) -> None:
         pass
@@ -94,8 +96,7 @@ class _FakeStreamResponse:
 
 @pytest.fixture()
 def fred_md_stream_mock(sample_csv_text: str) -> Generator[AsyncMock, None, None]:
-    lines = sample_csv_text.splitlines()
-    fake_stream = _FakeStreamResponse(lines)
+    fake_stream = _FakeStreamResponse(sample_csv_text.encode("utf-8"))
 
     mock_client = AsyncMock()
     mock_client.stream = MagicMock(return_value=fake_stream)

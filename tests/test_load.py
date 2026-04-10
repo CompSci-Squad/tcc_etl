@@ -8,11 +8,11 @@ import boto3
 import polars as pl
 import pytest
 from moto import mock_aws
-from pandera.errors import SchemaError
+from pandera.errors import SchemaError, SchemaErrors
 
 from tcc_etl.loader import (
-    FredMdRawSchema,
-    FredMdTransformedSchema,
+    FredMdRawModel,
+    FredMdTransformedModel,
     build_validation_df,
     to_s3,
     validate_and_upload,
@@ -39,7 +39,7 @@ class TestToS3:
             client.create_bucket(Bucket="test-etl-bucket")
             df = _make_valid_fred_md_df()
             with patch("tcc_etl.loader._s3", client):
-                await to_s3(df, "test-etl-bucket", "test/data.parquet")
+                await to_s3(df.lazy(), "test-etl-bucket", "test/data.parquet")
             obj = client.get_object(Bucket="test-etl-bucket", Key="test/data.parquet")
             assert obj["ContentLength"] > 0
 
@@ -49,7 +49,7 @@ class TestToS3:
             client.create_bucket(Bucket="test-etl-bucket")
             df = _make_valid_fred_md_df()
             with patch("tcc_etl.loader._s3", client):
-                await to_s3(df, "test-etl-bucket", "test/data.parquet")
+                await to_s3(df.lazy(), "test-etl-bucket", "test/data.parquet")
             body = client.get_object(Bucket="test-etl-bucket", Key="test/data.parquet")["Body"].read()
             recovered = pl.read_parquet(io.BytesIO(body))
             assert recovered.schema == df.schema
@@ -60,7 +60,7 @@ class TestToS3:
             client.create_bucket(Bucket="test-etl-bucket")
             df = _make_valid_fred_md_df()
             with patch("tcc_etl.loader._s3", client):
-                await to_s3(df, "test-etl-bucket", "test/roundtrip.parquet")
+                await to_s3(df.lazy(), "test-etl-bucket", "test/roundtrip.parquet")
             body = client.get_object(Bucket="test-etl-bucket", Key="test/roundtrip.parquet")["Body"].read()
             recovered = pl.read_parquet(io.BytesIO(body))
             assert df.equals(recovered)
@@ -130,34 +130,34 @@ class TestBuildValidationDf:
         assert result["series_id"][0] == "SERIES1"
 
 
-class TestFredMdRawSchema:
+class TestFredMdRawModel:
     def test_passes_valid_df(self) -> None:
-        FredMdRawSchema.validate(_make_valid_fred_md_df())
+        FredMdRawModel.validate(_make_valid_fred_md_df())
 
     def test_rejects_non_unique_date(self) -> None:
         df = pl.DataFrame(
             {"date": [date(1990, 1, 1), date(1990, 1, 1)], "SERIES1": [1.0, 2.0]}
         ).with_columns(pl.col("date").cast(pl.Date))
         with pytest.raises(SchemaError):
-            FredMdRawSchema.validate(df)
+            FredMdRawModel.validate(df)
 
     def test_rejects_null_date(self) -> None:
         df = pl.DataFrame(
             {"date": [None, date(1990, 2, 1)], "SERIES1": [1.0, 2.0]}
         ).with_columns(pl.col("date").cast(pl.Date))
         with pytest.raises(SchemaError):
-            FredMdRawSchema.validate(df)
+            FredMdRawModel.validate(df)
 
 
-class TestFredMdTransformedSchema:
+class TestFredMdTransformedModel:
     def test_passes_valid_df(self) -> None:
-        FredMdTransformedSchema.validate(_make_valid_fred_md_df())
+        FredMdTransformedModel.validate(_make_valid_fred_md_df())
 
     def test_passes_df_with_nulls_in_series(self) -> None:
         df = pl.DataFrame(
             {"date": [date(1990, 1, 1), date(1990, 2, 1)], "SERIES1": [None, 0.01]}
         ).with_columns(pl.col("date").cast(pl.Date))
-        FredMdTransformedSchema.validate(df)
+        FredMdTransformedModel.validate(df)
 
 
 class TestValidateAndUpload:
@@ -167,7 +167,7 @@ class TestValidateAndUpload:
             client.create_bucket(Bucket="test-etl-bucket")
             df = _make_valid_fred_md_df()
             with patch("tcc_etl.loader._s3", client):
-                await validate_and_upload(df, "test-etl-bucket", "test/raw.parquet", "raw")
+                await validate_and_upload(df.lazy(), "test-etl-bucket", "test/raw.parquet", "raw")
             keys = [o["Key"] for o in client.list_objects(Bucket="test-etl-bucket")["Contents"]]
             assert "test/raw.parquet" in keys
 
@@ -177,7 +177,7 @@ class TestValidateAndUpload:
             client.create_bucket(Bucket="test-etl-bucket")
             df = _make_valid_fred_md_df()
             with patch("tcc_etl.loader._s3", client):
-                await validate_and_upload(df, "test-etl-bucket", "test/trf.parquet", "transformed")
+                await validate_and_upload(df.lazy(), "test-etl-bucket", "test/trf.parquet", "transformed")
             keys = [o["Key"] for o in client.list_objects(Bucket="test-etl-bucket")["Contents"]]
             assert "test/trf.parquet" in keys
 
@@ -189,5 +189,5 @@ class TestValidateAndUpload:
                 {"date": [None, date(1990, 2, 1)], "S1": [1.0, 2.0]}
             ).with_columns(pl.col("date").cast(pl.Date))
             with patch("tcc_etl.loader._s3", client):
-                with pytest.raises(SchemaError):
-                    await validate_and_upload(df, "test-etl-bucket", "test/bad.parquet", "raw")
+                with pytest.raises(SchemaErrors):
+                    await validate_and_upload(df.lazy(), "test-etl-bucket", "test/bad.parquet", "raw")

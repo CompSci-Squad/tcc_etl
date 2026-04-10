@@ -31,26 +31,26 @@ class TestFetchFredMd:
         lf, _, _ = await fetch_fred_md()
         assert len(lf.collect()) == 5
 
-    async def test_date_filter_removes_pre_1990(self) -> None:
+    async def test_date_filter_removes_pre_1959(self) -> None:
         from collections.abc import AsyncGenerator
         from unittest.mock import AsyncMock, MagicMock
 
         lines = [
             "sasdate,SERIES1",
             "tcode,1",
-            "1/1/1989,99.0",
-            "1/1/1990,100.0",
-            "2/1/1990,101.0",
+            "1/1/1958,99.0",
+            "1/1/1959,100.0",
+            "2/1/1959,101.0",
         ]
+        csv_data = "\n".join(lines).encode("utf-8")
 
         class _FakeStream:
             async def __aenter__(self) -> "_FakeStream":
                 return self
             async def __aexit__(self, *a: object) -> None:
                 pass
-            async def aiter_lines(self) -> AsyncGenerator[str, None]:
-                for ln in lines:
-                    yield ln
+            async def aiter_bytes(self, chunk_size: int = 65_536) -> AsyncGenerator[bytes, None]:
+                yield csv_data
             def raise_for_status(self) -> None:
                 pass
 
@@ -65,7 +65,7 @@ class TestFetchFredMd:
 
         df = lf.collect()
         assert len(df) == 2
-        assert df["date"].min() == date(1990, 1, 1)
+        assert df["date"].min() == date(1959, 1, 1)
 
     async def test_date_dtype_is_pl_date(self, fred_md_stream_mock: AsyncMock) -> None:
         lf, _, _ = await fetch_fred_md()

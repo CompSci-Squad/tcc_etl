@@ -1,27 +1,29 @@
 services:
-  etl:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    platform: linux/arm64
-    environment:
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - S3_BUCKET=${S3_BUCKET:-tcc-etl-bucket}
-      # Point to LocalStack when running locally
-      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localstack:4566}
-    depends_on:
-      localstack:
-        condition: service_healthy
+  # etl:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile
+  #   platform: linux/arm64
+  #   environment:
+  #     - AWS_REGION=${AWS_REGION:-us-east-1}
+  #     - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+  #     - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+  #     - S3_BUCKET=${S3_BUCKET:-tcc-etl-bucket}
+  #     # Point to LocalStack when running locally
+  #     - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localstack:4566}
+  #   depends_on:
+  #     localstack:
+  #       condition: service_healthy
 
   localstack:
-    image: localstack/localstack:4.3
+    image: localstack/localstack:latest
     ports:
       - "4566:4566"
     environment:
-      - SERVICES=s3
+      - SERVICES=s3, lambda
       - DEBUG=${LOCALSTACK_DEBUG:-0}
+      - DISABLE_CORS_CHECKS=1
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 10s

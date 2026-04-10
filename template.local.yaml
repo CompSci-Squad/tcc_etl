@@ -1,12 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 
+# Local-only template: builds x86_64 image so sam local invoke works on amd64 dev machines.
+# For production deployment, use template.yaml (arm64).
+
 Globals:
   Function:
     Timeout: 300
-    MemorySize: 1024
+    MemorySize: 4096
     Architectures:
-      - arm64
+      - x86_64
 
 Resources:
   TccEtlFunction:
@@ -34,6 +37,8 @@ Resources:
       DockerContext: .
       Dockerfile: docker/Dockerfile
       DockerTag: tccetlfunction
+      DockerBuildArgs:
+        LAMBDA_ARCH: "x86_64"
 
   TccEtlBucket:
     Type: AWS::S3::Bucket

@@ -32,7 +32,6 @@ template.yaml
 samconfig.toml
 events/
 env.json
-pyproject.toml
 uv.lock
 
 # Documentation

@@ -6,11 +6,9 @@ from datetime import date
 import polars as pl
 import pytest
 
-from tcc_etl.transform import apply_tcode, remove_outliers, transform_all
+from tcc_etl.transform import _tcode_expr, remove_outliers, transform_all
 
 
-def _series(values: list, name: str = "x") -> pl.Series:
-    return pl.Series(name=name, values=values, dtype=pl.Float64)
 
 
 def _dates(n: int) -> list[date]:
@@ -53,76 +51,67 @@ class TestRemoveOutliers:
 
 
 
-class TestApplyTcode:
-    def test_tcode_1_identity(self) -> None:
-        s = _series([1.0, 2.0, 3.0])
-        result = apply_tcode(s, 1)
-        assert list(result) == [1.0, 2.0, 3.0]
+class TestTcodeExpr:
+    def _eval(self, values: list[float], tcode: int, col: str = "x") -> list:
+        lf = pl.DataFrame({"date": _dates(len(values)), col: values}).lazy()
+        return lf.with_columns([_tcode_expr(col, tcode)]).collect()[col].to_list()
 
-    def test_tcode_2_first_diff(self) -> None:
-        s = _series([10.0, 12.0, 15.0, 19.0])
-        result = apply_tcode(s, 2)
+    def test_tcode1_identity(self) -> None:
+        result = self._eval([1.0, 2.0, 3.0], 1)
+        assert result == [1.0, 2.0, 3.0]
+
+    def test_tcode2_first_diff(self) -> None:
+        result = self._eval([10.0, 12.0, 15.0, 19.0], 2)
         assert result[0] is None or math.isnan(result[0])
         assert result[1] == pytest.approx(2.0)
         assert result[2] == pytest.approx(3.0)
         assert result[3] == pytest.approx(4.0)
 
-    def test_tcode_3_second_diff(self) -> None:
-        s = _series([1.0, 2.0, 4.0, 7.0])
-        result = apply_tcode(s, 3)
+    def test_tcode3_second_diff(self) -> None:
+        result = self._eval([1.0, 2.0, 4.0, 7.0], 3)
         assert result[0] is None or math.isnan(result[0])
         assert result[1] is None or math.isnan(result[1])
         assert result[2] == pytest.approx(1.0)
         assert result[3] == pytest.approx(1.0)
 
-    def test_tcode_4_log(self) -> None:
-        s = _series([1.0, math.e, -1.0])
-        result = apply_tcode(s, 4)
+    def test_tcode4_log(self) -> None:
+        result = self._eval([1.0, math.e, -1.0], 4)
         assert result[0] == pytest.approx(0.0)
         assert result[1] == pytest.approx(1.0)
         assert result[2] is None or math.isnan(result[2])
 
-    def test_tcode_5_log_diff(self) -> None:
-        s = _series([1.0, math.e, math.e**2])
-        result = apply_tcode(s, 5)
+    def test_tcode5_log_diff(self) -> None:
+        result = self._eval([1.0, math.e, math.e**2], 5)
         assert result[0] is None or math.isnan(result[0])
         assert result[1] == pytest.approx(1.0)
         assert result[2] == pytest.approx(1.0)
 
-    def test_tcode_6_log_second_diff(self) -> None:
-        s = _series([1.0, math.e, math.e**2, math.e**4])
-        result = apply_tcode(s, 6)
+    def test_tcode6_log_second_diff(self) -> None:
+        result = self._eval([1.0, math.e, math.e**2, math.e**4], 6)
         assert result[0] is None or math.isnan(result[0])
         assert result[1] is None or math.isnan(result[1])
         assert result[2] == pytest.approx(0.0, abs=1e-9)
         assert result[3] == pytest.approx(1.0)
 
-    def test_tcode_7_pct_change_diff(self) -> None:
-        s = _series([100.0, 110.0, 121.0, 133.1])
-        result = apply_tcode(s, 7)
+    def test_tcode7_pct_change_diff(self) -> None:
+        result = self._eval([100.0, 110.0, 121.0, 133.1], 7)
         assert result[0] is None or math.isnan(result[0])
         assert result[1] is None or math.isnan(result[1])
         assert result[2] == pytest.approx(0.0, abs=1e-6)
 
     def test_unknown_tcode_raises_value_error(self) -> None:
-        s = _series([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="tcode desconhecido"):
-            apply_tcode(s, 99)
-
-    def test_output_is_polars_series(self) -> None:
-        s = _series([1.0, 2.0, 3.0])
-        result = apply_tcode(s, 1)
-        assert isinstance(result, pl.Series)
+            _tcode_expr("x", 99)
 
     def test_output_dtype_is_float64(self) -> None:
-        s = _series([1.0, 2.0, 3.0])
-        result = apply_tcode(s, 2)
-        assert result.dtype == pl.Float64
+        lf = pl.DataFrame({"date": _dates(3), "x": [1.0, 2.0, 3.0]}).lazy()
+        result = lf.with_columns([_tcode_expr("x", 2)]).collect()
+        assert result["x"].dtype == pl.Float64
 
     def test_output_name_preserved(self) -> None:
-        s = _series([1.0, 2.0], name="MYSERIES")
-        result = apply_tcode(s, 1)
-        assert result.name == "MYSERIES" or result.name == "MYSERIES".lower() or result.name == "MYSERIES" or result.name == s.name
+        lf = pl.DataFrame({"date": _dates(3), "MYSERIES": [1.0, 2.0, 3.0]}).lazy()
+        result = lf.with_columns([_tcode_expr("MYSERIES", 1)]).collect()
+        assert "MYSERIES" in result.columns
 
 
 # ---------------------------------------------------------------------------

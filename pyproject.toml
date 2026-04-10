@@ -16,14 +16,13 @@ classifiers = [
 
 dependencies = [
     "boto3>=1.37.7",
-    "jax[cpu]>=0.4",
-    "jaxlib>=0.4",
     "numpy>=1.26",
     "pandera[polars]>=0.20",
     "polars>=1.0.0",
     "httpx>=0.27",
     "pyarrow>=15.0",
     "statsmodels>=0.14",
+    "blake3>=1.0.8",
 ]
 
 [build-system]
@@ -72,7 +71,7 @@ select = [
     "RUF",   # Ruff-specific rules
 ]
 ignore = [
-    "S101",   # Use of `assert` detected (needed in tests)
+    "S101", # Use of `assert` detected (needed in tests)
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -114,17 +113,18 @@ exclude_lines = [
 
 
 [tool.taskipy.tasks]
-lint      = { cmd = "ruff check src tests",              help = "Run ruff linter" }
-fmt       = { cmd = "ruff format src tests",             help = "Format code with ruff" }
-fmt-check = { cmd = "ruff format --check src tests",     help = "Check formatting without modifying files" }
-typecheck = { cmd = "pyrefly check",                     help = "Run pyrefly type checker" }
-test      = { cmd = "pytest",                            help = "Run tests with coverage" }
-test-fast = { cmd = "pytest --no-cov -x",               help = "Run tests quickly (no coverage)" }
-sam-build  = { cmd = "uv run sam build",                                                                            help = "Build Lambda image with SAM" }
-sam-invoke = { cmd = "uv run sam local invoke TccEtlFunction -e events/invoke.json",                               help = "Invoke Lambda locally with SAM (no LocalStack)" }
-sam-local  = { cmd = "docker compose up -d localstack && uv run sam local invoke TccEtlFunction -e events/invoke.json --env-vars env.json", help = "Invoke Lambda locally against LocalStack" }
-sam-deploy = { cmd = "uv run sam deploy",                                                                          help = "Deploy stack to AWS via SAM" }
-local-down = { cmd = "docker compose down -v",                                                                     help = "Stop and remove local containers and volumes" }
-local-logs = { cmd = "docker compose logs -f localstack",                                                          help = "Tail LocalStack logs" }
-ci        = { cmd = "task lint && task fmt-check && task test", help = "Full CI check: lint + format + test" }
-all       = { cmd = "task fmt && task lint && task typecheck && task test", help = "Format, lint, typecheck, and test" }
+lint = { cmd = "ruff check src tests", help = "Run ruff linter" }
+fmt = { cmd = "ruff format src tests", help = "Format code with ruff" }
+fmt-check = { cmd = "ruff format --check src tests", help = "Check formatting without modifying files" }
+typecheck = { cmd = "pyrefly check", help = "Run pyrefly type checker" }
+test = { cmd = "pytest", help = "Run tests with coverage" }
+test-fast = { cmd = "pytest --no-cov -x", help = "Run tests quickly (no coverage)" }
+run-local = { cmd = "S3_BUCKET=local uv run python -c 'from tcc_etl.main import handler; import json; print(json.dumps(handler({}, None), indent=2))'", help = "Run the ETL pipeline locally (no Docker), writes test.parquet to cwd" }
+sam-build = { cmd =  "uv run sam build", help = "Build Lambda image with SAM (arm64, for production deployment)" }
+sam-invoke = { cmd = "uv run sam build --template template.local.yaml && uv run sam local invoke TccEtlFunction -e events/invoke.json", help = "Build (x86_64) and invoke Lambda locally, no LocalStack" }
+sam-local = { cmd = "docker compose up -d localstack && uv run sam build --template template.local.yaml && uv run sam local invoke TccEtlFunction -e events/invoke.json --env-vars env.json", help = "Build (x86_64) and invoke Lambda locally against LocalStack" }
+sam-deploy = { cmd = "uv run sam deploy", help = "Deploy stack to AWS via SAM" }
+local-down = { cmd = "docker compose down -v", help = "Stop and remove local containers and volumes" }
+local-logs = { cmd = "docker compose logs -f localstack", help = "Tail LocalStack logs" }
+ci = { cmd = "task lint && task fmt-check && task test", help = "Full CI check: lint + format + test" }
+all = { cmd = "task fmt && task lint && task typecheck && task test", help = "Format, lint, typecheck, and test" }

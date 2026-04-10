@@ -20,8 +20,8 @@ _SAMPLE_CSV = (
 
 
 class _FakeStreamResponse:
-    def __init__(self, lines: list[str]) -> None:
-        self._lines = lines
+    def __init__(self, data: bytes) -> None:
+        self._data = data
 
     async def __aenter__(self) -> "_FakeStreamResponse":
         return self
@@ -29,17 +29,15 @@ class _FakeStreamResponse:
     async def __aexit__(self, *a: object) -> None:
         pass
 
-    async def aiter_lines(self) -> AsyncGenerator[str, None]:
-        for line in self._lines:
-            yield line
+    async def aiter_bytes(self, chunk_size: int = 65_536) -> AsyncGenerator[bytes, None]:
+        yield self._data
 
     def raise_for_status(self) -> None:
         pass
 
 
 def _make_httpx_mock(csv_text: str) -> MagicMock:
-    lines = csv_text.splitlines()
-    fake_stream = _FakeStreamResponse(lines)
+    fake_stream = _FakeStreamResponse(csv_text.encode("utf-8"))
     mock_client = AsyncMock()
     mock_client.stream = MagicMock(return_value=fake_stream)
     mock_instance = AsyncMock()

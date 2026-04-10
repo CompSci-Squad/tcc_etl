@@ -15,11 +15,10 @@ async def _handler(event: dict, context: object) -> dict:
     lf, tcodes, series_ids = await fetch_fred_md()
 
     lf_clean = remove_outliers(lf, series_ids)
-    df_raw = lf_clean.collect()
-
     lf_transformed = transform_all(lf_clean, tcodes, series_ids)
-    df_transformed = lf_transformed.collect()
 
+    # Single collect for ADF validation stats and local test write
+    df_transformed = lf_transformed.collect()
     df_validation = build_validation_df(df_transformed, series_ids)
 
     now = datetime.now(tz=timezone.utc)
@@ -28,23 +27,28 @@ async def _handler(event: dict, context: object) -> dict:
     tag = f"{yr}_{mo}"
     pfx = f"year={yr}/month={mo}"
 
+    df_transformed.write_parquet("test.parquet")  # For local testing
+
     await asyncio.gather(
         validate_and_upload(
-            df_raw,
+            lf_clean,
             BUCKET,
             f"fred_md/raw/{pfx}/fred_md_raw_{tag}.parquet",
             "raw",
+            extraction_ts=now,
         ),
         validate_and_upload(
-            df_transformed,
+            lf_transformed,
             BUCKET,
             f"fred_md/transformed/{pfx}/fred_md_transformed_{tag}.parquet",
             "transformed",
+            extraction_ts=now,
         ),
         to_s3(
-            df_validation,
+            df_validation.lazy(),
             BUCKET,
             f"fred_md/metadata/{pfx}/fred_md_validation_{tag}.parquet",
+            extraction_ts=now,
         ),
     )
 

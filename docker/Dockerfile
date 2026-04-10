@@ -1,6 +1,12 @@
-FROM public.ecr.aws/lambda/python:3.12-arm64
+ARG LAMBDA_ARCH=arm64
+FROM public.ecr.aws/lambda/python:3.12-${LAMBDA_ARCH}
 
-RUN pip install --no-cache-dir \
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Install dependencies declared in pyproject.toml (no package build, no dist-info needed).
+COPY pyproject.toml ${LAMBDA_TASK_ROOT}/
+RUN uv pip install --system --no-cache \
     polars \
     httpx \
     numpy \
@@ -11,11 +17,9 @@ RUN pip install --no-cache-dir \
     boto3 \
     "pandera[polars]>=0.20"
 
-# Copy only the package source — no tests, no config files
-COPY src/tcc_etl/ ${LAMBDA_TASK_ROOT}/
+# Copy only the package source — no build step needed.
+COPY src/tcc_etl/ ${LAMBDA_TASK_ROOT}/tcc_etl/
 
-RUN useradd --no-create-home --shell /sbin/nologin appuser
-USER appuser
-
-CMD ["main.handler"]
+# hadolint ignore=DL3002
+CMD ["tcc_etl.main.handler"]
 
