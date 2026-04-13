@@ -38,7 +38,7 @@ default-groups = ["dev"]
 [dependency-groups]
 dev = [
     "aws-sam-cli",
-    "moto[s3]>=5.0.27",
+    "moto[s3]>=5.1.22",
     "pyrefly>=0.16.1",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.24",
