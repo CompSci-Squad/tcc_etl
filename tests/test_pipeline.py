@@ -58,6 +58,7 @@ class TestHandler:
             with (
                 patch("tcc_etl.extract.httpx.AsyncClient", _make_httpx_mock(_SAMPLE_CSV)),
                 patch("tcc_etl.loader._s3", client),
+                patch("boto3.client", return_value=client),
             ):
                 result = await main_mod._handler({}, None)
 
@@ -75,6 +76,7 @@ class TestHandler:
             with (
                 patch("tcc_etl.extract.httpx.AsyncClient", _make_httpx_mock(_SAMPLE_CSV)),
                 patch("tcc_etl.loader._s3", client),
+                patch("boto3.client", return_value=client),
             ):
                 await main_mod._handler({}, None)
 
@@ -102,7 +104,8 @@ class TestHandler:
             with (
                 patch("tcc_etl.extract.httpx.AsyncClient", _make_httpx_mock(_SAMPLE_CSV)),
                 patch("tcc_etl.loader._s3", client),
+                patch("boto3.client", return_value=client),
             ):
                 result = await main_mod._handler({}, None)
 
-        assert result["series"] == 3
+        assert result["series_input"] == 3

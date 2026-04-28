@@ -1,25 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import os
 from datetime import datetime, timezone
 
 from tcc_etl.extract import fetch_fred_md
+from tcc_etl.imputation import impute_lazyframe
 from tcc_etl.loader import build_validation_df, to_s3, validate_and_upload
 from tcc_etl.transform import remove_outliers, transform_all
 
 BUCKET: str = os.environ["S3_BUCKET"]
+_IMPUTE_K: int = int(os.environ.get("IMPUTE_K", "8"))
+_IMPUTE_MAX_MISSING_FRAC: float = float(os.environ.get("IMPUTE_MAX_MISSING_FRAC", "0.33"))
 
 
 async def _handler(event: dict, context: object) -> dict:
     lf, tcodes, series_ids = await fetch_fred_md()
 
     lf_clean = remove_outliers(lf, series_ids)
-    lf_transformed = transform_all(lf_clean, tcodes, series_ids)
+    lf_transformed_raw = transform_all(lf_clean, tcodes, series_ids)
 
-    # Single collect for ADF validation stats and local test write
+    lf_transformed, impute_report = impute_lazyframe(
+        lf_transformed_raw,
+        series_ids,
+        k=_IMPUTE_K,
+        max_missing_frac=_IMPUTE_MAX_MISSING_FRAC,
+    )
+
     df_transformed = lf_transformed.collect()
-    df_validation = build_validation_df(df_transformed, series_ids)
+    df_validation = build_validation_df(df_transformed, impute_report.kept_series)
 
     now = datetime.now(tz=timezone.utc)
     yr = now.strftime("%Y")
@@ -27,7 +38,17 @@ async def _handler(event: dict, context: object) -> dict:
     tag = f"{yr}_{mo}"
     pfx = f"year={yr}/month={mo}"
 
-    df_transformed.write_parquet("test.parquet")  # For local testing
+    import boto3
+
+    _s3 = boto3.client("s3")
+    impute_bytes = json.dumps(impute_report.to_dict(), indent=2).encode("utf-8")
+    await asyncio.to_thread(
+        _s3.put_object,
+        Bucket=BUCKET,
+        Key=f"fred_md/metadata/{pfx}/fred_md_imputation_{tag}.json",
+        Body=impute_bytes,
+        ContentType="application/json",
+    )
 
     await asyncio.gather(
         validate_and_upload(
@@ -54,7 +75,12 @@ async def _handler(event: dict, context: object) -> dict:
 
     return {
         "statusCode": 200,
-        "series": len(series_ids),
+        "series_input": len(series_ids),
+        "series_kept": len(impute_report.kept_series),
+        "series_dropped": len(impute_report.dropped_series),
+        "frac_imputed": impute_report.frac_imputed,
+        "em_iter": impute_report.n_iter,
+        "em_converged": impute_report.converged,
         "rows": len(df_transformed),
         "year": yr,
         "month": mo,

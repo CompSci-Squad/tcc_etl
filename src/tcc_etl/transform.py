@@ -60,15 +60,10 @@ def transform_all(
     if exprs:
         lf = lf.with_columns(exprs)
 
-    schema_names = lf.collect_schema().names()
-    fill_exprs = [
-        pl.col(c).forward_fill().backward_fill()
-        for c in series_ids
-        if c in schema_names
-    ]
-    lf = lf.slice(2)
-    if fill_exprs:
-        lf = lf.with_columns(fill_exprs)
-
-    return lf
+    # Drop the first 2 rows (consumed by .diff() in tcodes 3, 6).
+    # NOTE: we deliberately do *not* backfill here. Imputation of leading
+    # gaps (series whose recorded history starts after 1959-01-01) is
+    # handled explicitly downstream by ``tcc_etl.imputation.EMFactorImputer``
+    # so the policy is auditable and logged to S3 metadata.
+    return lf.slice(2)
 
