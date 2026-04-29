@@ -15,6 +15,7 @@ RUN uv pip install --system --no-cache \
     statsmodels \
     "pyarrow>=15.0" \
     boto3 \
+    blake3 \
     "pandera[polars]>=0.20"
 
 # Copy only the package source — no build step needed.
