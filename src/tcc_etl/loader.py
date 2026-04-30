@@ -33,6 +33,36 @@ class FredMdTransformedModel(pa.DataFrameModel):
         strict = False
 
 
+class FredMdMaskModel(pa.DataFrameModel):
+    """Boolean sidecar with the same shape as the transformed panel.
+
+    ``True`` means the cell was originally NaN and was filled by EM-PCA.
+    """
+
+    date: pl.Date = pa.Field(nullable=False, unique=True)
+    series_cols: pl.Boolean = pa.Field(alias="[A-Z].*", regex=True, nullable=False)
+
+    class Config:
+        strict = False
+
+
+class DataCardModel(pa.DataFrameModel):
+    series_id: pl.String = pa.Field(nullable=False, unique=True)
+    first_obs_date: pl.Date = pa.Field(nullable=True)
+    last_obs_date: pl.Date = pa.Field(nullable=True)
+    n_obs: pl.Int64 = pa.Field(nullable=False, ge=0)
+    n_missing_leading: pl.Int64 = pa.Field(nullable=False, ge=0)
+    n_missing_internal: pl.Int64 = pa.Field(nullable=False, ge=0)
+    frac_missing: pl.Float64 = pa.Field(nullable=False, ge=0.0, le=1.0)
+    frac_missing_leading: pl.Float64 = pa.Field(nullable=False, ge=0.0, le=1.0)
+    frac_missing_internal: pl.Float64 = pa.Field(nullable=False, ge=0.0, le=1.0)
+    kept: pl.Boolean = pa.Field(nullable=False)
+    drop_reason: pl.String = pa.Field(nullable=True)
+
+    class Config:
+        strict = True
+
+
 
 async def to_s3(
     lf: pl.LazyFrame,
@@ -82,11 +112,16 @@ async def validate_and_upload(
     lf: pl.LazyFrame,
     bucket: str,
     key: str,
-    schema: Literal["raw", "transformed"],
+    schema: Literal["raw", "transformed", "mask", "data_card"],
     *,
     extraction_ts: datetime | None = None,
 ) -> None:
-    schema_obj = FredMdRawModel if schema == "raw" else FredMdTransformedModel
+    schema_obj = {
+        "raw": FredMdRawModel,
+        "transformed": FredMdTransformedModel,
+        "mask": FredMdMaskModel,
+        "data_card": DataCardModel,
+    }[schema]
     schema_obj.validate(lf, lazy=True)
     await to_s3(lf, bucket, key, extraction_ts=extraction_ts)
 
