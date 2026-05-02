@@ -37,6 +37,63 @@ On every run the pipeline:
 
 ---
 
+## Transformations in detail
+
+Every transformation step exists for a specific statistical reason. The table
+below lists what we do, where it lives in the code, and why.
+
+### Per-series cleaning and stationarity
+
+| Step | What we apply | Where | Why |
+|------|---------------|-------|-----|
+| Outlier clipping | Replace $x_t$ with `null` when $x_t \notin [\mathrm{median}(x) \pm 10 \cdot \mathrm{IQR}(x)]$ | [`remove_outliers`](src/tcc_etl/transform.py) | FRED-MD contains data-entry errors and one-off shocks (oil shocks, COVID prints) that destabilise factor models and ADF tests. A wide $10\times\mathrm{IQR}$ band removes only the truly extreme entries while preserving real cycle amplitude. NaNs introduced here are filled later by EM-PCA. |
+| McCracken-Ng `tcodes` (next table) | Per-series transformation prescribed in the FRED-MD documentation | [`_tcode_expr`, `transform_all`](src/tcc_etl/transform.py) | Macro series live on very different scales and most are non-stationary. The `tcode` column shipped with the CSV tells us exactly which transform makes each series approximately stationary in mean and variance, which is the prerequisite for the EM-PCA imputer and any downstream factor model. |
+| Drop first 2 rows | `lf.slice(2)` | [`transform_all`](src/tcc_etl/transform.py) | Tcodes 3 and 6 use a second difference, which is undefined for the first two observations. Dropping them avoids leaking `null`s that are not "real" missingness into the imputer. |
+
+### McCracken-Ng tcodes
+
+The CSV's second row assigns one tcode per series. We apply the following:
+
+| Tcode | Formula (per series $x$) | Typical use case | Why this transform |
+|-------|---------------------------|------------------|---------------------|
+| `1` | $x_t$ (identity) | Already-stationary series (e.g. survey diffusion indices). | Nothing to do; the series is mean-reverting as published. |
+| `2` | $\Delta x_t = x_t - x_{t-1}$ | Series that drift in level but whose changes are stationary (e.g. unemployment rate). | First difference removes a unit root in the level. |
+| `3` | $\Delta^2 x_t$ | Series whose **change** still drifts (rare; some interest-rate spreads). | Differencing twice handles I(2) processes. |
+| `4` | $\log(x_t)$ | Strictly positive, scale-varying series whose log is stationary (e.g. some price ratios). | Log stabilises multiplicative variance and turns ratios into differences. |
+| `5` | $\Delta \log(x_t)$ | Most positive macro aggregates with trend growth: GDP components, industrial production, employment, money stocks, prices. | Approximates monthly growth rate; removes both unit root and exponential trend in one shot. |
+| `6` | $\Delta^2 \log(x_t)$ | Inflation-like series where the **growth rate** itself trends (CPI, PPI). | Captures changes in inflation, i.e. acceleration. |
+| `7` | $\Delta\!\left(\dfrac{x_t}{x_{t-1}} - 1\right)$ | Series where simple percentage change is the meaningful object but is non-stationary. | Stationarises percent-change series without taking logs of possibly negative or zero values. |
+
+The exact mapping `series_id -> tcode` is downloaded from FRED-MD on every
+run, never hardcoded. Unknown tcodes raise `ValueError("tcode desconhecido: ...")`
+to surface upstream changes immediately.
+
+### Panel-level imputation
+
+| Step | What we apply | Where | Why |
+|------|---------------|-------|-----|
+| Drop sparse columns | Remove series with $> \texttt{IMPUTE\_MAX\_MISSING\_FRAC}$ (default 0.5) NaNs | [`EMFactorImputer._select_columns`](src/tcc_etl/imputation.py) | Imputing a series that is mostly missing is extrapolation, not imputation. We refuse to fabricate more than half a column. The drop reason is recorded in the data card. |
+| EM-PCA imputation | Standardise the panel, then iterate truncated SVD with $k$ factors (default 8), refilling missing cells with the rank-$k$ reconstruction until the relative Frobenius norm of the change drops below $10^{-4}$ or 50 iterations are reached | [`EMFactorImputer.fit_transform_panel`](src/tcc_etl/imputation.py) | Stock and Watson (2002) showed macro panels are well approximated by a small number of common factors; iterating SVD on a partially observed matrix recovers the missing cells consistently when the factor structure is strong. Using $k=8$ matches the McCracken-Ng FRED-MD documentation. |
+| Imputation mask | Boolean panel of the same shape as the transformed panel, `True` where the original cell was NaN | [`EMFactorImputer.fit_transform_panel`](src/tcc_etl/imputation.py), saved to `fred_md_mask.parquet` | Downstream models (autoencoder in `tcc_ai`) must not be trained to reproduce values the imputer itself produced. The mask makes the original missingness pattern auditable forever. |
+| Leading vs internal split | Count NaNs that occur **before** a series' first real observation separately from NaNs **between** real observations | [`_split_leading_internal`](src/tcc_etl/imputation.py) and [`build_data_card`](src/tcc_etl/data_card.py) | Leading NaNs (e.g. `VXOCLSx` before the VIX existed in 1986) are a different problem from publication-delay NaNs and should be defended separately in the thesis. |
+
+### Subpanel selection and validation
+
+| Step | What we apply | Where | Why |
+|------|---------------|-------|-----|
+| Balanced subpanel | Keep only series whose first observation is on or before `BALANCED_CUTOFF_DATE` (default `1965-01-01`) | [`balanced_subpanel_columns`](src/tcc_etl/data_card.py) | These series have no leading-imputed cells in the sample window, so any model trained on them is robust to our imputation choices. The full panel and the balanced subpanel are both written so the thesis can present results both ways. |
+| Per-series ADF test | Augmented Dickey-Fuller p-value on each kept series | [`validate_series`](src/tcc_etl/loader.py) | Confirms post-tcode that the series is actually stationary. `flag_nonstationary = True` (p $\geq 0.05$) flags any tcode that did not work as advertised. |
+| Pandera schema validation | Validate `raw`, `transformed`, `mask`, and `data_card` dataframes against typed schemas before any write | [`FredMd*Model`, `validate_and_upload`](src/tcc_etl/loader.py) | Catches schema drift (new columns, dtype changes, duplicate dates) at pipeline boundaries. A schema failure aborts the run before a bad parquet ever lands on disk. |
+
+### References
+
+- McCracken, M. W. and Ng, S. (2016). *FRED-MD: A Monthly Database for
+  Macroeconomic Research*. Journal of Business and Economic Statistics, 34(4).
+- Stock, J. H. and Watson, M. W. (2002). *Macroeconomic Forecasting Using
+  Diffusion Indexes*. Journal of Business and Economic Statistics, 20(2).
+
+---
+
 ## Output files
 
 When you run the local script, the pipeline writes the following files into
