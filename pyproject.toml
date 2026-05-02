@@ -119,7 +119,7 @@ fmt-check = { cmd = "ruff format --check src tests", help = "Check formatting wi
 typecheck = { cmd = "pyrefly check", help = "Run pyrefly type checker" }
 test = { cmd = "pytest", help = "Run tests with coverage" }
 test-fast = { cmd = "pytest --no-cov -x", help = "Run tests quickly (no coverage)" }
-run-local = { cmd = "S3_BUCKET=local uv run python -c 'from tcc_etl.main import handler; import json; print(json.dumps(handler({}, None), indent=2))'", help = "Run the ETL pipeline locally (no Docker), writes test.parquet to cwd" }
+run-local = { cmd = "S3_BUCKET=local FRED_MD_VINTAGE=${FRED_MD_VINTAGE:-2026-03} uv run python -c 'from tcc_etl.main import run_local; import json, sys; sys.stdout.write(json.dumps(run_local(\"out\"), indent=2, default=str) + \"\\n\")'", help = "Run the FRED-MD pipeline locally and write parquet artifacts to ./out/ (no S3). Override the vintage with FRED_MD_VINTAGE=YYYY-MM." }
 sam-build = { cmd =  "uv run sam build", help = "Build Lambda image with SAM (arm64, for production deployment)" }
 sam-invoke = { cmd = "uv run sam build --template template.local.yaml && uv run sam local invoke TccEtlFunction -e events/invoke.json", help = "Build (x86_64) and invoke Lambda locally, no LocalStack" }
 sam-local = { cmd = "docker compose up -d localstack && uv run sam build --template template.local.yaml && uv run sam local invoke TccEtlFunction -e events/invoke.json --env-vars env.json", help = "Build (x86_64) and invoke Lambda locally against LocalStack" }

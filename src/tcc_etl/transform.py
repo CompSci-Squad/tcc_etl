@@ -59,11 +59,5 @@ def transform_all(
     ]
     if exprs:
         lf = lf.with_columns(exprs)
-
-    # Drop the first 2 rows (consumed by .diff() in tcodes 3, 6).
-    # NOTE: we deliberately do *not* backfill here. Imputation of leading
-    # gaps (series whose recorded history starts after 1959-01-01) is
-    # handled explicitly downstream by ``tcc_etl.imputation.EMFactorImputer``
-    # so the policy is auditable and logged to S3 metadata.
     return lf.slice(2)
 

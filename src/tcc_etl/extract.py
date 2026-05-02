@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from datetime import date
 
 import httpx
@@ -13,6 +14,10 @@ _START_DATE: pl.Date = pl.date(1959, 1, 1)
 
 
 def _fred_md_url(ref: date | None = None) -> str:
+    pinned = os.environ.get("FRED_MD_VINTAGE")
+    if pinned:
+        year_str, month_str = pinned.split("-", 1)
+        return f"{_FRED_MD_BASE}/{int(year_str):04d}-{int(month_str):02d}-md.csv"
     today = ref or date.today()
     if today.month == 1:
         year, month = today.year - 1, 12
@@ -40,8 +45,6 @@ async def fetch_fred_md() -> tuple[pl.LazyFrame, dict[str, int], list[str]]:
 
     header_line = raw[:first_nl].decode("utf-8").rstrip("\r")
     tcode_line = raw[first_nl + 1 : second_nl].decode("utf-8").rstrip("\r")
-
-    # Reconstruct CSV: header row + data rows only (tcode row excluded)
     csv_bytes = raw[: first_nl + 1] + raw[second_nl + 1 :]
 
     series_ids: list[str] = header_line.split(",")[1:]
